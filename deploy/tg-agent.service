@@ -1,0 +1,22 @@
+[Unit]
+Description=TG Manager Agent — Telegram bot with Google Sheets
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tgagent
+Group=tgagent
+WorkingDirectory=/opt/tg-manager-agent
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/tg-manager-agent/.env
+ExecStart=/opt/tg-manager-agent/.venv/bin/python main.py
+Restart=always
+RestartSec=10
+
+# Security hardening (optional, remove if causes permission issues)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

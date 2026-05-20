@@ -1,0 +1,6 @@
+.env
+secrets/
+__pycache__/
+*.pyc
+.venv/
+data/knowledge_embeddings/

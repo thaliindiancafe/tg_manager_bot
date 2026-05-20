@@ -1,0 +1,67 @@
+---
+description: Правила для Cursor AI при работе с проектом tg-manager-agent
+globs: ["**/*.py"]
+alwaysApply: true
+---
+
+# Роль
+Ты опытный Python-разработчик. Специализация: Telegram-боты на aiogram 3,
+AI-агенты на Google Gemini, интеграции с Google Workspace API.
+
+# Стек — строго следуй версиям
+- Python 3.11+
+- aiogram==3.20.0 (async, webhook на проде, polling в dev)
+- google-genai (НЕ google-generativeai — устарел с 30.11.2025)
+- google-api-python-client==2.x (Sheets, Calendar, Tasks, Drive)
+- google-auth-oauthlib
+- APScheduler==3.10.x
+- python-dotenv
+
+# Архитектурные правила
+- Все обращения к Google Sheets ТОЛЬКО через src/google/sheets.py
+- Все tool use функции агента ТОЛЬКО в src/agent/tools.py
+- Конфиг ТОЛЬКО из config.py через переменные окружения
+- Никогда не хардкодить ID таблиц, токены, ключи в коде
+- Каждая функция — async
+- Обязательный try/except с логированием в каждом Google API вызове
+- Exponential backoff при ошибке 429 от Google API
+- Хранить telegram_user_id как числовой ID, не только username
+
+# Google Sheets — структура листов (8 листов)
+Новая таблица (SPREADSHEET_ID):
+- schedule: date, employee, role, shift_start, shift_end, telegram_user_id
+- tasks: task_id, title, assigned_to, due_date, status, reminder_count, notes
+- events: title, date, time, description, calendar_id, created_by
+- chats: chat_id, chat_name, active, timezone
+- employees: name, telegram_user_id, username, role, google_tasks_id, active
+- automations: id, trigger_type, trigger_time, trigger_day, action, params, active
+- memory_facts: employee, fact, created_at
+- memory_history: chat_id, role, content, timestamp
+
+Старая таблица (SOURCE_SPREADSHEET_ID):
+- только чтение через drive.py
+- sync раз в день в 07:00
+
+# Память агента
+- Перед каждым вызовом Gemini: загружать get_facts() + get_recent_history(chat_id, 30)
+- memory_facts — постоянные факты, не удаляются
+- memory_history — чистить записи старше 30 дней через cleanup_old_history()
+- Кэш read_sheet() на 60 секунд
+
+# Gemini — правила вызова
+- Модель: gemini-2.5-flash-lite
+- SDK: from google import genai / from google.genai import types
+- Tool use обязателен для всех действий с данными
+- Системный промпт на русском языке
+
+# Scheduler
+- Только одна cron задача: run_automations() каждые 5 минут
+- Timezone: Europe/Moscow
+- Нет автоматических рассылок — только динамические автоматизации из листа automations
+
+# Запрещено
+- Не использовать google-generativeai (устарел)
+- Не писать синхронный код там где нужен async
+- Не хранить состояние в памяти процесса — только в Sheets
+- Не делать прямые вызовы Google API из handlers
+- Не полагаться только на username — всегда сохранять telegram_user_id
