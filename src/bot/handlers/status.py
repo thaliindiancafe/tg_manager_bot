@@ -10,6 +10,7 @@ from aiogram.enums import ChatType
 from aiogram.types import Message
 
 from src.agent.client import ERROR_MESSAGE, call_agent
+from src.bot.reply_format import send_bot_reply
 from src.bot.group_gate import should_process_group_message
 from src.bot.typing_indicator import typing_while
 from src.google import sheets
@@ -60,7 +61,7 @@ async def handle_status_message(message: Message) -> None:
                 history,
                 group_chat_mode=is_group,
             )
-        await message.answer(reply)
+        await send_bot_reply(message, reply, raw_html=True)
     except Exception as exc:
         logger.error(
             "handle_status_message failed: chat_id=%s error=%s",
@@ -68,4 +69,4 @@ async def handle_status_message(message: Message) -> None:
             exc,
             exc_info=True,
         )
-        await message.answer(ERROR_MESSAGE)
+        await send_bot_reply(message, ERROR_MESSAGE)

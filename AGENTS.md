@@ -106,6 +106,11 @@ WEBHOOK_URL, WEBHOOK_SECRET, TIMEZONE, DEV_MODE
 
 ## Отложенные решения (вернуться позже)
 
+### Лист `events` → только Google Calendar (2026-05-20)
+
+Клиент хочет без вкладки events в Sheets; источник правды — Google Calendar (синк с другими почтами).
+Сейчас events = зеркало; отложено: calendar-only. См. `CLAUDE.md`, `system_memory._system_deferred_events_sheet`.
+
 ### Задачи клиента: Sheets vs Google Tasks API (2026-05-15)
 
 **Сценарий:** клиент пишет задачи боту в Telegram → бот сохраняет и выполняет/напоминает

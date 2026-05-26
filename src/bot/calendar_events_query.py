@@ -57,7 +57,7 @@ def _format_events_reply(
 ) -> str:
     dates = events_data.get("dates") or []
     date_label = ", ".join(dates) if dates else "указанную дату"
-    calendar_rows = events_data.get("calendar") or []
+    calendar_rows = events_data.get("calendar_live") or events_data.get("calendar") or []
     sheet_rows = events_data.get("sheet") or []
 
     task_lines = _format_google_tasks_section(tasks_data or {})
@@ -68,11 +68,11 @@ def _format_events_reply(
 
     if not has_events and not has_tasks:
         return (
-            f"На {date_label} в календаре нет встреч, мероприятий и задач "
+            f"📅 На {date_label} в календаре нет встреч, мероприятий и задач "
             f"Google Tasks со сроком на этот день."
         )
 
-    lines = [f"На {date_label}:"]
+    lines = [f"📌 На {date_label}:"]
     if task_lines:
         lines.extend(task_lines)
     elif sheet_task_rows:
@@ -86,16 +86,25 @@ def _format_events_reply(
     if has_events:
         if has_tasks:
             lines.append("")
-            lines.append("Встречи и мероприятия:")
+            lines.append("📅 Встречи и мероприятия:")
         else:
-            lines[0] = f"В календаре на {date_label}:"
+            lines[0] = f"📅 В календаре на {date_label}:"
         for row in calendar_rows:
             title = str(row.get("title", "")).strip() or "(без названия)"
             time_str = str(row.get("time", "")).strip()
+            date_str = str(row.get("date", "")).strip()
+            desc = str(row.get("description", "")).strip()
             label = str(row.get("source_calendar_label", "")).strip()
-            suffix = f" {time_str}" if time_str else ""
-            cal_hint = f" [{label}]" if label else ""
-            lines.append(f"• {title}{suffix}{cal_hint}")
+            lines.append(f"• {title}")
+            if date_str:
+                lines.append(f"  📅 {date_str}")
+            if time_str:
+                lines.append(f"  🕐 {time_str}")
+            if desc:
+                short = desc[:200] + ("…" if len(desc) > 200 else "")
+                lines.append(f"  - {short}")
+            if label:
+                lines.append(f"  ({label})")
         for row in sheet_rows:
             title = str(row.get("title", "")).strip() or "(без названия)"
             time_str = str(row.get("time", "")).strip()

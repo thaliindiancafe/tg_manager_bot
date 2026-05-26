@@ -53,15 +53,17 @@ Telegram AI-агент для управления командой рестор
 Фазы 1–5: см. журнал в roadmap. **Фаза 5:** статусы `awaiting_proof`/`review`, **`submit_task_proof`**, проверка чеклиста (Vision + JSON в **`__TASK_PROOF_REPORT__`**), **`approve_task`** / **`reject_task_proof`**, inline-кнопки выбора задачи в личке.
 
 ## Google Calendar (два календаря)
-- **Код:** `src/google/calendar.py`, маршрутизация `src/google/calendar_targets.py`.
-- **Запись** `create_event` → `CALENDAR_EVENTS_ID` (календарь «Мероприятия»).
-- **Чтение** `get_today_events` → основной (`CALENDAR_ID` / `CALENDAR_PRIMARY_ID`) + events.
-- Service account: доступ «Вносить изменения в мероприятия» на оба календаря.
-- Env: `CALENDAR_ID`, `CALENDAR_EVENTS_ID`, опц. `CALENDAR_*_LABEL`.
+- **Код:** `src/google/calendar.py`, `src/scheduler/events_sync.py`, `src/google/calendar_targets.py`.
+- **Запись** `create_event` → `CALENDAR_EVENTS_ID` (календарь «Мероприятия») + строка в лист **events**.
+- **Утренний синк** `sync_events_from_google_calendars` — **07:05** МСК (по умолчанию): лист **events** = события **текущего месяца** из основного + «Мероприятия» (как график в 07:00).
+- **Чтение** `get_events_for_dates` → лист **events** + live API (`calendar_live`) без дублей.
+- Service account: доступ «Вносить изменения в мероприятия» на оба календаря; чтение — OAuth или SA.
+- Env: `CALENDAR_ID`, `CALENDAR_EVENTS_ID`, `EVENTS_SYNC_ENABLED`, `EVENTS_SYNC_HOUR`, `EVENTS_SYNC_MINUTE`.
 
 ## Google Tasks (личный Gmail, OAuth)
 - **OAuth:** `src/google/oauth_credentials.py`, `GOOGLE_TASKS_*` в `.env`.
-- **Скрипты:** `google_tasks_oauth_setup.py`, `sync_tasklists_to_employees.py --apply` (разовая привязка).
+- **Привязка списков:** `tasklist_employees_sync.py` — cron **07:10** МСК (`GOOGLE_TASKS_LISTS_SYNC_*`); новые списки Tasks → строка в `employees` без дублей.
+- **Скрипт (ручной):** `sync_tasklists_to_employees.py --apply`.
 - **Поток:** `create_task` / `delegate_private_reminder` → лист `tasks` + дубль в Google Tasks.
 - **Авто-список:** если у сотрудника нет `google_tasks_id` — `ensure_tasklist_for_employee_row` в `tasklist_resolve.py` ищет список по имени или **создаёт** новый и пишет id в `employees`.
 - **Импорт:** `google_tasks_sheets_sync.py` каждые 5 мин с открытых списков в `tasks` (`GOOGLE_TASKS_SHEETS_SYNC_ENABLED`).
@@ -118,11 +120,22 @@ Telegram webhook URL: https://домен/webhook
 BOT_TOKEN, GEMINI_API_KEY, SPREADSHEET_ID, SOURCE_SPREADSHEET_ID,
 SOURCE_SCHEDULE_SHEET_NAME (опц.), SCHEDULE_ROLE_CATEGORY_ALIASES_JSON (опц.),
 GOOGLE_CREDENTIALS_JSON, DRIVE_KNOWLEDGE_FOLDER_ID, KNOWLEDGE_SYNC_*,
-CALENDAR_ID, CALENDAR_EVENTS_ID, GOOGLE_TASKS_USE_OAUTH, GOOGLE_TASKS_OAUTH_*,
+CALENDAR_ID, CALENDAR_EVENTS_ID, EVENTS_SYNC_*, GOOGLE_TASKS_USE_OAUTH, GOOGLE_TASKS_OAUTH_*,
 GOOGLE_TASKS_SHEETS_SYNC_ENABLED, GROUP_AGENT_REQUIRE_MENTION,
 WEBHOOK_URL, WEBHOOK_SECRET, TIMEZONE, DEV_MODE
 
 ## Отложенные решения (вернуться позже)
+
+### Лист `events` в Sheets → только Google Calendar (2026-05-20)
+
+**Запрос клиента:** вести мероприятия без вкладки events в таблице бота; всё через Google Calendar
+(там синхронизация с другими почтами — для неё это основная база).
+
+**Сейчас:** `create_event` пишет в Calendar + лист events; cron `sync_events_from_google_calendars`
+зеркалит месяц в events. Клиенту можно сказать: вкладку не заполнять вручную.
+
+**Отложенная доработка:** режим calendar-only — убрать запись/синк в лист events, оставить только
+`src/google/calendar.py` + `get_events_for_dates` из API. Память агента: `_system_deferred_events_sheet`.
 
 ### Задачи клиента: Sheets vs Google Tasks API (2026-05-15)
 

@@ -1343,9 +1343,10 @@ async def create_event(
     description: str,
 ) -> dict[str, Any]:
     """
-    Создать мероприятие в Google Calendar (календарь «Мероприятия») и записать в лист events.
+    Создать мероприятие в Google Calendar (календарь «Мероприятия») и сразу в лист events.
 
-    date: YYYY-MM-DD, time: HH:MM.
+    Обязательно вызывай, когда просят создать/запланировать мероприятие, встречу, событие.
+    date: YYYY-MM-DD, time: HH:MM (если время не сказано — разумное по смыслу).
     Используй для встреч, мероприятий, праздников, событий ресторана.
     """
     try:
@@ -1418,13 +1419,28 @@ async def get_events_for_dates(
             if _normalize_schedule_date_cell(row.get("date")) in set(targets)
         ]
 
+        sheet_event_ids = {
+            str(row.get("calendar_id", "")).strip()
+            for row in sheet_for_dates
+            if str(row.get("calendar_id", "")).strip()
+        }
+        calendar_live = [
+            ev
+            for ev in calendar_events
+            if str(ev.get("id", "")).strip() not in sheet_event_ids
+        ]
+
         return {
             "dates": targets,
             "calendars_queried": [
                 {"id": cid, "label": label} for cid, label in read_targets
             ],
-            "calendar": calendar_events,
+            "calendar_live": calendar_live,
             "sheet": sheet_for_dates,
+            "note": (
+                "sheet — журнал (утренний синк + create_event); calendar_live — "
+                "события из API, которых ещё нет в sheet за эти даты"
+            ),
         }
     except Exception as exc:
         logger.error(
@@ -1566,79 +1582,139 @@ async def read_drive_document(file_id: str) -> str:
         raise
 
 
-async def register_employee(
+def _valid_telegram_user_id(raw: int | None) -> str | None:
+    """Positive Telegram user id as string, or None if unknown / invalid."""
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return str(value)
+
+
+def _employee_row_payload(
     name: str,
-    telegram_user_id: int,
     username: str,
     role: str,
+    telegram_user_id: str | None,
+    *,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    base = dict(existing) if existing else {}
+    tid = telegram_user_id or str(base.get("telegram_user_id", "")).strip()
+    if tid in {"0", ""}:
+        tid = telegram_user_id or ""
+    payload = {
+        "name": name,
+        "telegram_user_id": tid,
+        "username": username,
+        "role": role or str(base.get("role", "")).strip(),
+        "google_tasks_id": str(base.get("google_tasks_id", "")).strip(),
+        "active": "true",
+    }
+    return payload
+
+
+async def _find_employee_row_for_register(
+    name: str,
+    username: str,
+    telegram_user_id: str | None,
+) -> tuple[int | None, dict[str, Any] | None]:
+    if telegram_user_id:
+        idx, row = await _employee_row_by_telegram_id(telegram_user_id)
+        if row is not None:
+            return idx, row
+
+    un = _normalize_username(username)
+    if un:
+        matches = await _employee_rows_by_username(un)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return None, None  # caller handles ambiguity
+
+    return await _employee_row_by_name_insensitive(name)
+
+
+async def register_employee(
+    name: str,
+    username: str = "",
+    role: str = "",
+    telegram_user_id: int = 0,
 ) -> dict[str, Any]:
     """
-    Зарегистрировать или обновить сотрудника в справочнике employees.
+    Добавить или обновить сотрудника в листе employees (Google Sheets).
 
-    telegram_user_id — числовой ID Telegram (не @username).
-    Если строка с таким ID или таким именем (без учёта регистра) уже есть — обновит её,
-    иначе добавит новую. Используй, когда добавляют человека в команду или привязывают Telegram.
+    name — имя в таблице (Ирина, Роксана).
+    username — @ник (с @ или без); желательно для привязки после /start в личке с ботом.
+    role — должность (менеджер, бариста, шеф, уборщик…).
+    telegram_user_id — числовой ID Telegram; передай 0 или не указывай, если ID ещё неизвестен.
+
+    Поиск строки: telegram_user_id → @username → имя. Не выдумывай ID.
+    После /start сотрудник с тем же @username получит telegram_user_id автоматически.
     """
     try:
-        tid = str(int(telegram_user_id))
-        un = (username or "").strip()
-        role_clean = (role or "").strip()
-        name_clean = name.strip()
+        name_clean = (name or "").strip()
+        if not name_clean:
+            return {"ok": False, "error": "Пустое имя сотрудника"}
 
-        idx, row = await _employee_row_by_telegram_id(tid)
-        if row is not None and idx is not None:
-            merged = dict(row)
-            merged["name"] = name_clean
-            merged["telegram_user_id"] = tid
-            merged["username"] = un
-            if role_clean:
-                merged["role"] = role_clean
-            await sheets.update_row("employees", idx, merged)
+        un = _normalize_username(username)
+        role_clean = (role or "").strip()
+        tid = _valid_telegram_user_id(telegram_user_id)
+
+        un_matches = await _employee_rows_by_username(un) if un else []
+        if len(un_matches) > 1:
+            names = [str(r.get("name", "")) for _, r in un_matches]
             return {
-                "name": name_clean,
-                "telegram_user_id": int(tid),
-                "username": un,
-                "role": str(merged.get("role", "")).strip(),
-                "active": str(merged.get("active", "true")).lower() == "true",
-                "updated": True,
+                "ok": False,
+                "error": f"Несколько строк с @{un}: {', '.join(names)}. Уточните в таблице.",
             }
 
-        idx2, row2 = await _employee_row_by_name_insensitive(name_clean)
-        if row2 is not None and idx2 is not None:
-            merged = dict(row2)
-            merged["name"] = name_clean
-            merged["telegram_user_id"] = tid
-            merged["username"] = un
-            if role_clean:
-                merged["role"] = role_clean
-            await sheets.update_row("employees", idx2, merged)
+        idx, row = await _find_employee_row_for_register(
+            name_clean, un, tid
+        )
+
+        if row is not None and idx is not None:
+            merged = _employee_row_payload(
+                name_clean,
+                un or str(row.get("username", "")).strip(),
+                role_clean,
+                tid,
+                existing=row,
+            )
+            await sheets.update_row("employees", idx, merged)
+            out_tid = str(merged.get("telegram_user_id", "")).strip()
             return {
+                "ok": True,
                 "name": name_clean,
-                "telegram_user_id": int(tid),
-                "username": un,
-                "role": str(merged.get("role", "")).strip(),
-                "active": str(merged.get("active", "true")).lower() == "true",
+                "username": merged["username"],
+                "role": merged["role"],
+                "telegram_user_id": int(out_tid) if out_tid.isdigit() else None,
+                "active": True,
                 "updated": True,
             }
 
         await sheets.append_row(
             "employees",
-            {
-                "name": name_clean,
-                "telegram_user_id": tid,
-                "username": un,
-                "role": role_clean,
-                "google_tasks_id": "",
-                "active": "true",
-            },
+            _employee_row_payload(name_clean, un, role_clean, tid),
         )
         return {
+            "ok": True,
             "name": name_clean,
-            "telegram_user_id": int(tid),
             "username": un,
             "role": role_clean,
+            "telegram_user_id": int(tid) if tid else None,
             "active": True,
             "updated": False,
+            "hint": (
+                "Строка создана. Пусть сотрудник напишет боту /start в личке — "
+                "подставится telegram_user_id по @username."
+                if not tid
+                else ""
+            ),
         }
     except Exception as exc:
         logger.error(
@@ -1648,6 +1724,64 @@ async def register_employee(
             exc,
             exc_info=True,
         )
+        raise
+
+
+async def register_employees_bulk(employees_text: str) -> dict[str, Any]:
+    """
+    Добавить или обновить нескольких сотрудников в employees из текста списка.
+
+    Формат строк: «Имя, должность - @username» (как в сообщении руководителя).
+    telegram_user_id не нужен — подтянется после /start по @username.
+
+    Всегда вызывай этот tool для «внеси в базу», «добавь сотрудников» со списком.
+    Отвечай пользователю только по полям ok_count, failed, results — не выдумывай успех.
+    """
+    from src.utils.employee_register_parse import parse_employees_bulk_text
+
+    try:
+        parsed = parse_employees_bulk_text(employees_text)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": (
+                    "Не распознан ни один сотрудник. Формат: «Имя, должность - @username» "
+                    "по одному на строку."
+                ),
+                "ok_count": 0,
+                "failed": [],
+            }
+
+        results: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+
+        for item in parsed:
+            res = await register_employee(
+                item.name,
+                username=item.username,
+                role=item.role,
+                telegram_user_id=0,
+            )
+            entry = {
+                "name": item.name,
+                "username": item.username,
+                "role": item.role,
+                **res,
+            }
+            results.append(entry)
+            if not res.get("ok"):
+                failed.append(entry)
+
+        ok_count = sum(1 for r in results if r.get("ok"))
+        return {
+            "ok": ok_count > 0 and not failed,
+            "ok_count": ok_count,
+            "total_parsed": len(parsed),
+            "failed": failed,
+            "results": results,
+        }
+    except Exception as exc:
+        logger.error("register_employees_bulk failed: %s", exc, exc_info=True)
         raise
 
 

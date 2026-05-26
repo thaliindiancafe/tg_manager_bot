@@ -21,6 +21,7 @@ from src.agent.prompt import SYSTEM_PROMPT
 from src.agent import tools as agent_tools
 from src.config import settings, use_openai_llm
 from src.google import sheets
+from src.utils.telegram_reply import format_bot_reply
 
 logger = logging.getLogger(__name__)
 
@@ -358,11 +359,33 @@ FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "name": {"type": "string"},
-                "telegram_user_id": {"type": "integer"},
-                "username": {"type": "string"},
+                "username": {
+                    "type": "string",
+                    "description": "@username с @ или без",
+                },
                 "role": {"type": "string"},
+                "telegram_user_id": {
+                    "type": "integer",
+                    "description": "0 если ID неизвестен",
+                },
             },
-            "required": ["name", "telegram_user_id", "username", "role"],
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "register_employees_bulk",
+        "description": inspect.getdoc(agent_tools.register_employees_bulk) or "",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "employees_text": {
+                    "type": "string",
+                    "description": (
+                        "Полный текст со списком: «Имя, должность - @username» по строкам"
+                    ),
+                },
+            },
+            "required": ["employees_text"],
         },
     },
     {
@@ -476,6 +499,7 @@ TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
     "sync_knowledge_folder": agent_tools.sync_knowledge_folder,
     "list_knowledge_sources": agent_tools.list_knowledge_sources,
     "register_employee": agent_tools.register_employee,
+    "register_employees_bulk": agent_tools.register_employees_bulk,
     "delegate_private_reminder": agent_tools.delegate_private_reminder,
     "send_dm_to_employee": agent_tools.send_dm_to_employee,
     "send_brief_to_primary_work_chat": agent_tools.send_brief_to_primary_work_chat,
@@ -750,7 +774,7 @@ async def _generate_with_tools(
     else:
         final_text = (response.text or "").strip()
 
-    return final_text or ERROR_MESSAGE
+    return format_bot_reply(final_text or ERROR_MESSAGE)
 
 
 async def _save_history(chat_id: int, user_message: str, model_message: str) -> None:
@@ -857,13 +881,15 @@ async def call_agent(
             )
 
         try:
-            return await openai_llm.run_agent(
-                user_message,
-                chat_id,
-                history,
-                build_system_instruction=_build,
-                load_cross_chat_section=_load_cross_chat_system_section,
-                save_history=_save_history,
+            return format_bot_reply(
+                await openai_llm.run_agent(
+                    user_message,
+                    chat_id,
+                    history,
+                    build_system_instruction=_build,
+                    load_cross_chat_section=_load_cross_chat_system_section,
+                    save_history=_save_history,
+                )
             )
         except Exception as exc:
             logger.error(
@@ -872,11 +898,19 @@ async def call_agent(
                 exc,
                 exc_info=True,
             )
-            return _user_message_for_agent_error(exc)
+            return format_bot_reply(_user_message_for_agent_error(exc))
 
     try:
         facts = await sheets.get_facts()
-        sheet_history = await sheets.get_recent_history(chat_id, limit=30)
+        try:
+            sheet_history = await sheets.get_recent_history(chat_id, limit=30)
+        except Exception as exc:
+            logger.warning(
+                "call_agent: history unavailable chat_id=%s error=%s",
+                chat_id,
+                exc,
+            )
+            sheet_history = []
 
         merged_history = sheet_history
         if len(history) > len(sheet_history):
@@ -903,7 +937,7 @@ async def call_agent(
                 exc,
                 exc_info=True,
             )
-        return reply
+        return format_bot_reply(reply)
     except Exception as exc:
         logger.error(
             "call_agent failed: chat_id=%s error=%s",
@@ -911,4 +945,4 @@ async def call_agent(
             exc,
             exc_info=True,
         )
-        return _user_message_for_agent_error(exc)
+        return format_bot_reply(_user_message_for_agent_error(exc))

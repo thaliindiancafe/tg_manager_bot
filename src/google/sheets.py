@@ -16,13 +16,13 @@ from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
 from src.config import settings
+from src.google.http_transport import build_authorized_http
 
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 CACHE_TTL_SECONDS = 60
-MAX_ATTEMPTS = 3
-BACKOFF_DELAYS = (2, 4, 8)
+BACKOFF_DELAYS = (1, 2, 4, 8, 16)
 
 VALID_SHEETS = frozenset(
     {
@@ -107,9 +107,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 T = TypeVar("T")
 
 _service: Resource | None = None
+_credentials: service_account.Credentials | None = None
 _sheet_ids: dict[str, int] = {}
 _sheet_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _cache_lock = asyncio.Lock()
+_sheets_semaphore: asyncio.Semaphore | None = None
 
 
 def _resolve_credentials_path() -> Path:
@@ -121,16 +123,29 @@ def _resolve_credentials_path() -> Path:
     return path
 
 
-def _build_service() -> Resource:
+def _reset_sheets_service() -> None:
     global _service
+    _service = None
+
+
+def _get_sheets_semaphore() -> asyncio.Semaphore:
+    global _sheets_semaphore
+    if _sheets_semaphore is None:
+        _sheets_semaphore = asyncio.Semaphore(settings.google_sheets_max_concurrent)
+    return _sheets_semaphore
+
+
+def _build_service() -> Resource:
+    global _service, _credentials
     if _service is not None:
         return _service
 
-    credentials = service_account.Credentials.from_service_account_file(
+    _credentials = service_account.Credentials.from_service_account_file(
         str(_resolve_credentials_path()),
         scopes=SCOPES,
     )
-    _service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
+    http = build_authorized_http(_credentials)
+    _service = build("sheets", "v4", http=http, cache_discovery=False)
     return _service
 
 
@@ -152,9 +167,18 @@ def _is_transient_sheets_error(exc: BaseException) -> bool:
         return True
     if isinstance(exc, (ssl.SSLError, ConnectionError, TimeoutError, OSError)):
         return True
+    if isinstance(exc, asyncio.TimeoutError):
+        return True
     if isinstance(exc, HttpError) and exc.resp is not None:
         return exc.resp.status in {500, 502, 503, 504}
     return False
+
+
+def _should_reset_connection(exc: BaseException) -> bool:
+    return isinstance(
+        exc,
+        (ssl.SSLError, ConnectionError, TimeoutError, OSError, asyncio.TimeoutError),
+    )
 
 
 async def _execute_with_backoff(
@@ -162,25 +186,43 @@ async def _execute_with_backoff(
     *args: Any,
     **kwargs: Any,
 ) -> T:
+    max_attempts = settings.google_sheets_max_attempts
+    timeout_sec = settings.google_sheets_request_timeout
     last_error: BaseException | None = None
 
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            return await asyncio.to_thread(func, *args, **kwargs)
-        except Exception as exc:
-            last_error = exc
-            if _is_transient_sheets_error(exc) and attempt < MAX_ATTEMPTS - 1:
-                delay = BACKOFF_DELAYS[attempt]
+    async with _get_sheets_semaphore():
+        for attempt in range(max_attempts):
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(func, *args, **kwargs),
+                    timeout=timeout_sec,
+                )
+            except asyncio.TimeoutError:
+                last_error = TimeoutError(
+                    f"Google Sheets: нет ответа за {timeout_sec} с "
+                    f"(попытка {attempt + 1}/{max_attempts})"
+                )
+                _reset_sheets_service()
+            except Exception as exc:
+                last_error = exc
+                if _should_reset_connection(exc):
+                    _reset_sheets_service()
+
+            if last_error is None:
+                continue
+
+            if _is_transient_sheets_error(last_error) and attempt < max_attempts - 1:
+                delay = BACKOFF_DELAYS[min(attempt, len(BACKOFF_DELAYS) - 1)]
                 logger.warning(
                     "Google Sheets transient error (%s), retry %s/%s in %ss",
-                    type(exc).__name__,
+                    type(last_error).__name__,
                     attempt + 1,
-                    MAX_ATTEMPTS,
+                    max_attempts,
                     delay,
                 )
                 await asyncio.sleep(delay)
                 continue
-            raise
+            raise last_error
 
     assert last_error is not None
     raise last_error
@@ -397,6 +439,15 @@ async def read_sheet(sheet_name: str) -> list[dict[str, Any]]:
 
         return list(rows)
     except Exception as exc:
+        async with _cache_lock:
+            stale = _sheet_cache.get(sheet_name)
+            if stale:
+                logger.warning(
+                    "read_sheet: stale cache for %s after %s",
+                    sheet_name,
+                    exc,
+                )
+                return list(stale[1])
         logger.error(
             "read_sheet failed: sheet=%s error=%s",
             sheet_name,
@@ -495,14 +546,12 @@ async def get_recent_history(chat_id: int | str, limit: int = 30) -> list[dict[s
         )
         return matched[:limit]
     except Exception as exc:
-        logger.error(
-            "get_recent_history failed: chat_id=%s limit=%s error=%s",
+        logger.warning(
+            "get_recent_history failed (empty history): chat_id=%s error=%s",
             chat_id,
-            limit,
             exc,
-            exc_info=True,
         )
-        raise
+        return []
 
 
 async def get_chat_labels_map() -> dict[str, str]:
@@ -550,14 +599,12 @@ async def get_recent_history_other_chats(
         )
         return matched[:limit]
     except Exception as exc:
-        logger.error(
-            "get_recent_history_other_chats failed: exclude=%s limit=%s error=%s",
+        logger.warning(
+            "get_recent_history_other_chats failed (skipped): exclude=%s error=%s",
             exclude_chat_id,
-            limit,
             exc,
-            exc_info=True,
         )
-        raise
+        return []
 
 
 async def get_facts() -> list[dict[str, Any]]:
@@ -565,8 +612,8 @@ async def get_facts() -> list[dict[str, Any]]:
     try:
         return await read_sheet("memory_facts")
     except Exception as exc:
-        logger.error("get_facts failed: error=%s", exc, exc_info=True)
-        raise
+        logger.warning("get_facts failed (empty facts): error=%s", exc)
+        return []
 
 
 def _list_sheet_titles_sync() -> set[str]:
@@ -757,6 +804,52 @@ async def replace_schedule_rows(rows: list[dict[str, Any]]) -> None:
     except Exception as exc:
         logger.error(
             "replace_schedule_rows failed: rows=%s error=%s",
+            len(rows),
+            exc,
+            exc_info=True,
+        )
+        raise
+
+
+def _replace_events_rows_sync(rows: list[dict[str, Any]]) -> None:
+    headers = SHEET_HEADERS["events"]
+    service = _build_service()
+    (
+        service.spreadsheets()
+        .values()
+        .clear(
+            spreadsheetId=settings.spreadsheet_id,
+            range="events!A2:Z",
+        )
+        .execute()
+    )
+    if not rows:
+        return
+    body_values = [[row.get(h, "") for h in headers] for row in rows]
+    end_col = _col_letter(len(headers))
+    end_row = len(body_values) + 1
+    (
+        service.spreadsheets()
+        .values()
+        .update(
+            spreadsheetId=settings.spreadsheet_id,
+            range=f"events!A2:{end_col}{end_row}",
+            valueInputOption="USER_ENTERED",
+            body={"values": body_values},
+        )
+        .execute()
+    )
+
+
+async def replace_events_rows(rows: list[dict[str, Any]]) -> None:
+    """Clear events data rows (from row 2) and write new rows; keeps header row 1."""
+    try:
+        _validate_sheet_name("events")
+        await _execute_with_backoff(_replace_events_rows_sync, rows)
+        await _invalidate_cache("events")
+    except Exception as exc:
+        logger.error(
+            "replace_events_rows failed: rows=%s error=%s",
             len(rows),
             exc,
             exc_info=True,

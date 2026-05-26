@@ -11,6 +11,7 @@ from aiogram.enums import ChatType
 from aiogram.types import Message
 
 from src.agent.client import ERROR_MESSAGE, call_agent, describe_photo
+from src.bot.reply_format import send_bot_reply
 from src.bot.typing_indicator import typing_while
 from src.bot.delegation_reply import extract_reply_delegation_task_id
 from src.bot.handlers.delegation_routing import try_handle_photo_proof
@@ -87,7 +88,7 @@ async def handle_photo_message(message: Message, bot: Bot) -> None:
                 group_chat_mode=is_group,
             )
 
-        await message.answer(reply)
+        await send_bot_reply(message, reply, raw_html=True)
     except Exception as exc:
         logger.error(
             "handle_photo_message failed: chat_id=%s error=%s",
@@ -95,4 +96,4 @@ async def handle_photo_message(message: Message, bot: Bot) -> None:
             exc,
             exc_info=True,
         )
-        await message.answer(ERROR_MESSAGE)
+        await send_bot_reply(message, ERROR_MESSAGE)

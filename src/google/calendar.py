@@ -194,6 +194,88 @@ def _get_events_for_day_sync(
     ]
 
 
+def _list_events_in_range_sync(
+    calendar_id: str,
+    range_start: date,
+    range_end: date,
+    *,
+    source_calendar_label: str = "",
+) -> list[dict[str, Any]]:
+    """All non-cancelled instances in [range_start, range_end] inclusive."""
+    if range_end < range_start:
+        return []
+
+    tz = _get_timezone()
+    start_dt = datetime(
+        range_start.year,
+        range_start.month,
+        range_start.day,
+        tzinfo=tz,
+    )
+    end_dt = datetime(
+        range_end.year,
+        range_end.month,
+        range_end.day,
+        tzinfo=tz,
+    ) + timedelta(days=1)
+
+    service = _build_read_service()
+    result = (
+        service.events()
+        .list(
+            calendarId=calendar_id,
+            timeMin=start_dt.isoformat(),
+            timeMax=end_dt.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+    label = source_calendar_label or calendar_id
+    out: list[dict[str, Any]] = []
+    for item in result.get("items", []):
+        if str(item.get("status", "")).strip() == "cancelled":
+            continue
+        out.append(
+            _event_to_dict(
+                item,
+                source_calendar_id=calendar_id,
+                source_calendar_label=label,
+            )
+        )
+    return out
+
+
+async def list_events_in_range(
+    calendar_id: str,
+    start_date: str,
+    end_date: str,
+    *,
+    source_calendar_label: str = "",
+) -> list[dict[str, Any]]:
+    """List events between YYYY-MM-DD dates (inclusive)."""
+    try:
+        start = _parse_date(start_date)
+        end = _parse_date(end_date)
+        return await asyncio.to_thread(
+            _list_events_in_range_sync,
+            calendar_id,
+            start,
+            end,
+            source_calendar_label=source_calendar_label,
+        )
+    except Exception as exc:
+        logger.error(
+            "list_events_in_range failed: calendar_id=%s start=%s end=%s error=%s",
+            calendar_id,
+            start_date,
+            end_date,
+            exc,
+            exc_info=True,
+        )
+        raise
+
+
 def _get_today_events_sync(
     calendar_id: str,
     *,

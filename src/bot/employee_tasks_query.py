@@ -21,6 +21,11 @@ from src.utils.employee_name_match import (
 logger = logging.getLogger(__name__)
 
 _TASK_WORD = re.compile(r"задач|поручен", re.IGNORECASE)
+_TASK_CREATE = re.compile(
+    r"добав(ь|ить)|создай|создать|постав(ь|ить)|запиши|новую\s+задач|"
+    r"нужно\s+.*задач|задач[ауы]\s+для",
+    re.IGNORECASE,
+)
 _MY_TASKS = re.compile(
     r"мои\s+задач|мои\s+поручен|у\s+меня\s+задач|какие\s+у\s+меня|"
     r"что\s+у\s+меня\s+по\s+задач|мои\s+открыт|покажи\s+мои",
@@ -115,7 +120,13 @@ async def _employee_by_telegram_user_id(telegram_user_id: int) -> str | None:
     return None
 
 
+def _looks_like_task_create_query(text: str) -> bool:
+    return bool(_TASK_CREATE.search(text))
+
+
 def _looks_like_task_list_query(text: str) -> bool:
+    if _looks_like_task_create_query(text):
+        return False
     return bool(_TASK_WORD.search(text))
 
 

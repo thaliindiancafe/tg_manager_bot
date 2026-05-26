@@ -14,12 +14,14 @@ from src.bot.handlers.status import is_status_message
 from src.bot.delegation_reply import extract_reply_delegation_task_id
 from src.bot.delegation_reply import extract_task_id_from_user_text
 from src.bot.calendar_events_query import try_reply_calendar_events_query
+from src.bot.employee_register_query import try_reply_employee_register_bulk
 from src.bot.employee_tasks_query import try_reply_employee_tasks_query
 from src.bot.schedule_query import try_reply_schedule_query
 from src.bot.tasks_for_dates_query import try_reply_tasks_for_dates_query
 from src.bot.handlers.delegation_routing import maybe_offer_task_choice
 from src.bot.group_gate import should_process_group_message
 from src.bot.private_agent_message import with_private_telegram_context
+from src.bot.reply_format import send_bot_reply
 from src.google import sheets
 
 logger = logging.getLogger(__name__)
@@ -49,6 +51,11 @@ async def handle_text_message(message: Message) -> None:
 
         async with typing_while(message.bot, chat_id, message_thread_id=thread_id):
             if await maybe_offer_task_choice(message):
+                return
+
+            register_reply = await try_reply_employee_register_bulk(text)
+            if register_reply is not None:
+                await send_bot_reply(message, register_reply, raw_html=True)
                 return
 
             uid = message.from_user.id if message.from_user else None
@@ -82,7 +89,7 @@ async def handle_text_message(message: Message) -> None:
                     group_chat_mode=is_group,
                 )
 
-        await message.answer(reply)
+        await send_bot_reply(message, reply, raw_html=True)
     except Exception as exc:
         logger.error(
             "handle_text_message failed: chat_id=%s error=%s",
@@ -90,4 +97,4 @@ async def handle_text_message(message: Message) -> None:
             exc,
             exc_info=True,
         )
-        await message.answer(ERROR_MESSAGE)
+        await send_bot_reply(message, ERROR_MESSAGE)

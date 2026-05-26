@@ -24,6 +24,9 @@ _ENV_ALIASES: dict[str, str] = {
     "employee_role_aliases_json": "EMPLOYEE_ROLE_ALIASES_JSON",
     "schedule_unpacking_roles": "SCHEDULE_UNPACKING_ROLES",
     "google_credentials_json": "GOOGLE_CREDENTIALS_JSON",
+    "google_sheets_request_timeout": "GOOGLE_SHEETS_REQUEST_TIMEOUT",
+    "google_sheets_max_attempts": "GOOGLE_SHEETS_MAX_ATTEMPTS",
+    "google_sheets_max_concurrent": "GOOGLE_SHEETS_MAX_CONCURRENT",
     "webhook_url": "WEBHOOK_URL",
     "webhook_secret": "WEBHOOK_SECRET",
     "timezone": "TIMEZONE",
@@ -41,6 +44,9 @@ _ENV_ALIASES: dict[str, str] = {
     "knowledge_sync_enabled": "KNOWLEDGE_SYNC_ENABLED",
     "knowledge_sync_hour": "KNOWLEDGE_SYNC_HOUR",
     "knowledge_sync_minute": "KNOWLEDGE_SYNC_MINUTE",
+    "events_sync_enabled": "EVENTS_SYNC_ENABLED",
+    "events_sync_hour": "EVENTS_SYNC_HOUR",
+    "events_sync_minute": "EVENTS_SYNC_MINUTE",
     "knowledge_chunk_max_chars": "KNOWLEDGE_CHUNK_MAX_CHARS",
     "knowledge_search_top_k": "KNOWLEDGE_SEARCH_TOP_K",
     "knowledge_embedding_model": "KNOWLEDGE_EMBEDDING_MODEL",
@@ -52,6 +58,10 @@ _ENV_ALIASES: dict[str, str] = {
     "google_tasks_my_list_title": "GOOGLE_TASKS_MY_LIST_TITLE",
     "google_tasks_reminders_enabled": "GOOGLE_TASKS_REMINDERS_ENABLED",
     "google_tasks_sheets_sync_enabled": "GOOGLE_TASKS_SHEETS_SYNC_ENABLED",
+    "google_tasks_lists_sync_enabled": "GOOGLE_TASKS_LISTS_SYNC_ENABLED",
+    "google_tasks_lists_sync_hour": "GOOGLE_TASKS_LISTS_SYNC_HOUR",
+    "google_tasks_lists_sync_minute": "GOOGLE_TASKS_LISTS_SYNC_MINUTE",
+    "google_tasks_lists_auto_register": "GOOGLE_TASKS_LISTS_AUTO_REGISTER",
     "calendar_id": "CALENDAR_ID",
     "calendar_primary_id": "CALENDAR_PRIMARY_ID",
     "calendar_events_id": "CALENDAR_EVENTS_ID",
@@ -92,6 +102,24 @@ class Settings(BaseSettings):
         validation_alias="SCHEDULE_UNPACKING_ROLES",
     )
     google_credentials_json: str = Field(validation_alias="GOOGLE_CREDENTIALS_JSON")
+    google_sheets_request_timeout: int = Field(
+        default=20,
+        ge=5,
+        le=120,
+        validation_alias="GOOGLE_SHEETS_REQUEST_TIMEOUT",
+    )
+    google_sheets_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=8,
+        validation_alias="GOOGLE_SHEETS_MAX_ATTEMPTS",
+    )
+    google_sheets_max_concurrent: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        validation_alias="GOOGLE_SHEETS_MAX_CONCURRENT",
+    )
     webhook_url: str = Field(validation_alias="WEBHOOK_URL")
     webhook_secret: str = Field(validation_alias="WEBHOOK_SECRET")
     timezone: str = Field(validation_alias="TIMEZONE")
@@ -164,6 +192,22 @@ class Settings(BaseSettings):
         le=59,
         validation_alias="KNOWLEDGE_SYNC_MINUTE",
     )
+    events_sync_enabled: bool = Field(
+        default=True,
+        validation_alias="EVENTS_SYNC_ENABLED",
+    )
+    events_sync_hour: int = Field(
+        default=7,
+        ge=0,
+        le=23,
+        validation_alias="EVENTS_SYNC_HOUR",
+    )
+    events_sync_minute: int = Field(
+        default=5,
+        ge=0,
+        le=59,
+        validation_alias="EVENTS_SYNC_MINUTE",
+    )
     knowledge_chunk_max_chars: int = Field(
         default=900,
         ge=200,
@@ -211,6 +255,26 @@ class Settings(BaseSettings):
     google_tasks_sheets_sync_enabled: bool = Field(
         default=True,
         validation_alias="GOOGLE_TASKS_SHEETS_SYNC_ENABLED",
+    )
+    google_tasks_lists_sync_enabled: bool = Field(
+        default=True,
+        validation_alias="GOOGLE_TASKS_LISTS_SYNC_ENABLED",
+    )
+    google_tasks_lists_sync_hour: int = Field(
+        default=7,
+        ge=0,
+        le=23,
+        validation_alias="GOOGLE_TASKS_LISTS_SYNC_HOUR",
+    )
+    google_tasks_lists_sync_minute: int = Field(
+        default=10,
+        ge=0,
+        le=59,
+        validation_alias="GOOGLE_TASKS_LISTS_SYNC_MINUTE",
+    )
+    google_tasks_lists_auto_register: bool = Field(
+        default=True,
+        validation_alias="GOOGLE_TASKS_LISTS_AUTO_REGISTER",
     )
     calendar_id: str = Field(
         default="",
@@ -283,9 +347,29 @@ class Settings(BaseSettings):
                 return False
         return bool(value)
 
-    @field_validator("google_tasks_sheets_sync_enabled", mode="before")
+    @field_validator(
+        "google_tasks_sheets_sync_enabled",
+        "google_tasks_lists_sync_enabled",
+        "google_tasks_lists_auto_register",
+        mode="before",
+    )
     @classmethod
-    def _parse_google_tasks_sheets_sync_enabled(cls, value: object) -> bool:
+    def _parse_google_tasks_bool_flags(cls, value: object) -> bool:
+        if value is None or value == "":
+            return True
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return bool(value)
+
+    @field_validator("events_sync_enabled", mode="before")
+    @classmethod
+    def _parse_events_sync_enabled(cls, value: object) -> bool:
         if value is None or value == "":
             return True
         if isinstance(value, bool):

@@ -12,7 +12,9 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from src.config import settings
 from src.scheduler.automations import run_automations, sync_schedule
+from src.scheduler.events_sync import sync_events_from_google_calendars
 from src.scheduler.knowledge_sync import sync_knowledge_from_drive
+from src.scheduler.tasklists_employees_sync import sync_tasklists_to_employees_daily
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,18 @@ def start_scheduler(bot: Bot) -> AsyncIOScheduler:
         replace_existing=True,
         max_instances=1,
     )
+    if settings.events_sync_enabled:
+        _scheduler.add_job(
+            sync_events_from_google_calendars,
+            trigger=CronTrigger(
+                hour=settings.events_sync_hour,
+                minute=settings.events_sync_minute,
+                timezone=tz,
+            ),
+            id="sync_events_from_google_calendars",
+            replace_existing=True,
+            max_instances=1,
+        )
     if settings.knowledge_sync_enabled:
         _scheduler.add_job(
             sync_knowledge_from_drive,
@@ -56,6 +70,18 @@ def start_scheduler(bot: Bot) -> AsyncIOScheduler:
             replace_existing=True,
             max_instances=1,
         )
+    if settings.google_tasks_lists_sync_enabled:
+        _scheduler.add_job(
+            sync_tasklists_to_employees_daily,
+            trigger=CronTrigger(
+                hour=settings.google_tasks_lists_sync_hour,
+                minute=settings.google_tasks_lists_sync_minute,
+                timezone=tz,
+            ),
+            id="sync_tasklists_to_employees_daily",
+            replace_existing=True,
+            max_instances=1,
+        )
     _scheduler.start()
     knowledge_cron = (
         f"sync_knowledge_from_drive daily {settings.knowledge_sync_hour:02d}:"
@@ -63,8 +89,23 @@ def start_scheduler(bot: Bot) -> AsyncIOScheduler:
         if settings.knowledge_sync_enabled
         else "sync_knowledge_from_drive disabled"
     )
+    events_cron = (
+        f"sync_events daily {settings.events_sync_hour:02d}:"
+        f"{settings.events_sync_minute:02d}"
+        if settings.events_sync_enabled
+        else "sync_events disabled"
+    )
+    tasklists_cron = (
+        f"sync_tasklists_to_employees daily {settings.google_tasks_lists_sync_hour:02d}:"
+        f"{settings.google_tasks_lists_sync_minute:02d}"
+        if settings.google_tasks_lists_sync_enabled
+        else "sync_tasklists_to_employees disabled"
+    )
     logger.info(
-        "Scheduler started: run_automations every 5 min, sync_schedule 07:00, %s (%s)",
+        "Scheduler started: run_automations every 5 min, sync_schedule 07:00, "
+        "%s, %s, %s (%s)",
+        events_cron,
+        tasklists_cron,
         knowledge_cron,
         settings.timezone,
     )

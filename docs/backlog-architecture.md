@@ -7,6 +7,15 @@
 | База знаний + RAG + Drive 08:00 | [specs/knowledge-rag-spec.md](specs/knowledge-rag-spec.md) | **Реализовано** (cron 08:00, tools) |
 | Recurring из Google Doc | [specs/recurring-events-spec.md](specs/recurring-events-spec.md) | План |
 | Google Tasks сотрудников | [specs/google-tasks-sync-spec.md](specs/google-tasks-sync-spec.md) | План |
+| Убрать лист `events`, только Google Calendar | — | **Отложено** (запрос клиента 2026-05-20) |
+
+## Отложено: calendar-only вместо листа `events`
+
+Клиент: мероприятия только в Google Calendar (синхронизация с другими почтами), вкладку events в таблице бота не вести.
+
+**Сейчас:** зеркало `events` (create_event + sync 07:05). **Цель:** чтение/запись только Calendar API.
+
+Память: `memory_facts` → `_system_deferred_events_sheet` (`scripts/seed_system_memory.py`).
 
 ## Порядок внедрения
 
