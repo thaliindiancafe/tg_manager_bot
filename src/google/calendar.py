@@ -17,6 +17,7 @@ from src.google.oauth_credentials import (
     USER_OAUTH_SCOPES,
     load_user_credentials,
     oauth_configured,
+    oauth_has_calendar_read_scope,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,21 @@ def _build_read_service() -> Resource:
     """Read events: OAuth (client Gmail) when configured, else service account."""
     global _read_service, _read_service_mode
 
-    use_oauth = settings.google_tasks_use_oauth and oauth_configured()
+    use_oauth = (
+        settings.google_tasks_use_oauth
+        and oauth_configured()
+        and oauth_has_calendar_read_scope()
+    )
+    if (
+        settings.google_tasks_use_oauth
+        and oauth_configured()
+        and not oauth_has_calendar_read_scope()
+    ):
+        logger.warning(
+            "OAuth token has no Calendar read scope (403 on events). "
+            "Re-run: python scripts/google_tasks_oauth_setup.py — "
+            "using service account for Calendar read until then."
+        )
     mode = "oauth" if use_oauth else "service_account"
 
     if _read_service is not None and _read_service_mode == mode:
@@ -327,7 +342,8 @@ def _create_event_sync(
     event_id = created.get("id")
     if not event_id:
         raise RuntimeError("Google Calendar did not return event id")
-    return str(event_id)
+    html_link = str(created.get("htmlLink", "") or "").strip()
+    return {"event_id": str(event_id), "html_link": html_link}
 
 
 def _delete_event_sync(calendar_id: str, event_id: str) -> None:
@@ -427,8 +443,8 @@ async def create_event(
     date: str,
     time: str,
     description: str,
-) -> str:
-    """Create a calendar event. date=YYYY-MM-DD, time=HH:MM. Returns event_id."""
+) -> dict[str, str]:
+    """Create a calendar event. date=YYYY-MM-DD, time=HH:MM. Returns event_id and html_link."""
     try:
         return await asyncio.to_thread(
             _create_event_sync,

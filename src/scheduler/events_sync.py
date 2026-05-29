@@ -65,6 +65,11 @@ async def sync_events_from_google_calendars() -> int:
     Replace events sheet rows with events from configured read calendars
     for the current calendar month.
     """
+    # In calendar-only mode (or DB backend), we do not maintain the Sheets mirror.
+    if getattr(settings, "calendar_only_mode", False) or settings.storage_backend.strip().lower() == "db":
+        logger.debug("sync_events_from_google_calendars: skipped (calendar_only_mode/db)")
+        return 0
+
     if not settings.events_sync_enabled:
         logger.debug("sync_events_from_google_calendars: disabled")
         return 0

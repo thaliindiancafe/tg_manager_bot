@@ -141,7 +141,9 @@ def _build_agent_message(action: str, params: str) -> str:
 
 
 async def _get_active_chats() -> list[dict[str, Any]]:
-    chats = await sheets.read_sheet("chats")
+    from src.storage.access import list_chats
+
+    chats = await list_chats()
     return [row for row in chats if _is_active(row.get("active"))]
 
 
@@ -176,7 +178,9 @@ async def run_automations(bot: Bot | None = None) -> int:
 
     try:
         now = datetime.now(_get_tz())
-        await sync_google_tasks_to_sheets()
+        # When TASKS_API_PRIMARY or DB backend is enabled, Tasks are no longer mirrored into Sheets.
+        if not settings.tasks_api_primary and settings.storage_backend.strip().lower() != "db":
+            await sync_google_tasks_to_sheets()
 
         reminder_hours = parse_reminder_hours_csv(settings.task_reminder_hours)
         if should_run_task_reminders_now(
@@ -192,7 +196,9 @@ async def run_automations(bot: Bot | None = None) -> int:
                 settings.task_reminder_hours,
             )
 
-        automations = await sheets.read_sheet("automations")
+        from src.storage.access import list_automations
+
+        automations = await list_automations()
         active_automations = [
             row for row in automations if _is_active(row.get("active"))
         ]
@@ -202,7 +208,7 @@ async def run_automations(bot: Bot | None = None) -> int:
 
         active_chats = await _get_active_chats()
         if not active_chats:
-            logger.warning("run_automations: no active chats in sheet 'chats'")
+            logger.warning("run_automations: no active chats in DB/Sheet 'chats'")
             return executed
 
         primary_chat_id = int(str(active_chats[0]["chat_id"]))
@@ -245,11 +251,16 @@ async def run_automations(bot: Bot | None = None) -> int:
 
 
 def _schedule_sync_fact_text() -> str:
+    store_hint = (
+        "таблица schedule в Supabase"
+        if settings.storage_backend.strip().lower() == "db"
+        else "лист schedule в таблице бота"
+    )
     return (
-        "График смен: лист schedule в таблице бота обновляется автоматически каждый день в 07:00 "
+        f"График смен: {store_hint} обновляется автоматически каждый день в 07:00 "
         f"(часовой пояс {settings.timezone}). Источник — вкладка "
-        f"«{settings.source_schedule_sheet_name}» в таблице клиента (SOURCE); "
-        "в schedule загружаются строки только за текущий календарный месяц. "
+        f"«{settings.source_schedule_sheet_name}» в таблице клиента (SOURCE_SPREADSHEET_ID, "
+        "только чтение); в хранилище попадают строки только за текущий календарный месяц. "
         "На вопросы «кто на смене», «кто работает завтра/вчера» всегда вызывай инструмент "
         "get_schedule_for_dates с preset=today / tomorrow / yesterday или с явными датами "
         "YYYY-MM-DD; не смешивай даты и не опирайся на строки вне запрошенного дня."
@@ -258,8 +269,9 @@ def _schedule_sync_fact_text() -> str:
 
 async def sync_schedule() -> None:
     """
-    Read client sheet tab (SOURCE_SCHEDULE_SHEET_NAME), parse current calendar month,
-    replace bot spreadsheet ``schedule`` (row 2+). Intended for daily cron (07:00 Moscow).
+    Read client schedule tab (SOURCE_SPREADSHEET_ID), parse current calendar month,
+    replace schedule in DB (STORAGE_BACKEND=db) or bot spreadsheet schedule sheet.
+    Intended for daily cron (07:00 Moscow).
     """
     try:
         now = datetime.now(_get_tz())
@@ -269,12 +281,25 @@ async def sync_schedule() -> None:
             logger.warning("sync_schedule: no cells in source sheet %r", sheet_name)
 
         rows = parse_schedule_grid(values, now)
-        await sheets.replace_schedule_rows(rows)
+        if settings.storage_backend.strip().lower() == "db":
+            from src.storage import get_store
+
+            await get_store().schedule.replace_schedule_rows(rows)
+        else:
+            await sheets.replace_schedule_rows(rows)
         try:
-            await sheets.upsert_memory_fact_row(
-                SCHEDULE_SYNC_MEMORY_EMPLOYEE,
-                _schedule_sync_fact_text(),
-            )
+            if settings.storage_backend.strip().lower() == "db":
+                from src.storage import get_store
+
+                await get_store().memory.upsert_fact(
+                    employee=SCHEDULE_SYNC_MEMORY_EMPLOYEE,
+                    fact=_schedule_sync_fact_text(),
+                )
+            else:
+                await sheets.upsert_memory_fact_row(
+                    SCHEDULE_SYNC_MEMORY_EMPLOYEE,
+                    _schedule_sync_fact_text(),
+                )
         except Exception as mem_exc:
             logger.warning(
                 "sync_schedule: schedule OK but memory_facts upsert failed: %s",

@@ -531,9 +531,17 @@ async def delete_row(sheet_name: str, row_index: int) -> None:
         raise
 
 
+def _storage_is_db() -> bool:
+    return (getattr(settings, "storage_backend", "sheets") or "sheets").strip().lower() == "db"
+
+
 async def get_recent_history(chat_id: int | str, limit: int = 30) -> list[dict[str, Any]]:
     """Last N memory_history rows for chat_id, newest first."""
     try:
+        if _storage_is_db():
+            from src.storage import get_store
+
+            return await get_store().memory.get_recent_history(int(chat_id), limit=limit)
         chat_key = str(chat_id)
         rows = await read_sheet("memory_history")
         matched = [row for row in rows if str(row.get("chat_id", "")) == chat_key]
@@ -557,7 +565,12 @@ async def get_recent_history(chat_id: int | str, limit: int = 30) -> list[dict[s
 async def get_chat_labels_map() -> dict[str, str]:
     """Map telegram chat_id (string) -> human label from sheet chats."""
     try:
-        rows = await read_sheet("chats")
+        if _storage_is_db():
+            from src.storage.access import list_chats
+
+            rows = await list_chats()
+        else:
+            rows = await read_sheet("chats")
         out: dict[str, str] = {}
         for row in rows:
             cid = str(row.get("chat_id", "")).strip()
@@ -585,6 +598,14 @@ async def get_recent_history_other_chats(
         if limit < 1:
             return []
 
+        if _storage_is_db():
+            from src.storage import get_store
+
+            return await get_store().memory.get_recent_history_other_chats(
+                exclude_chat_id=int(exclude_chat_id),
+                limit=limit,
+            )
+
         rows = await read_sheet("memory_history")
         matched = [
             row
@@ -610,6 +631,10 @@ async def get_recent_history_other_chats(
 async def get_facts() -> list[dict[str, Any]]:
     """All rows from memory_facts."""
     try:
+        if _storage_is_db():
+            from src.storage import get_store
+
+            return await get_store().memory.list_facts()
         return await read_sheet("memory_facts")
     except Exception as exc:
         logger.warning("get_facts failed (empty facts): error=%s", exc)
@@ -864,6 +889,11 @@ async def upsert_knowledge_source_row(
 ) -> None:
     """Insert or update knowledge_sources row by source_id."""
     try:
+        if _storage_is_db():
+            from src.storage.access import upsert_knowledge_source_row as _db_upsert
+
+            await _db_upsert(source_id, row, existing)
+            return
         _validate_sheet_name("knowledge_sources")
         sid = str(source_id).strip()
         if existing is not None:
@@ -891,6 +921,14 @@ async def upsert_knowledge_source_row(
 async def upsert_memory_fact_row(employee_key: str, fact_text: str) -> None:
     """Insert or update one row in memory_facts matched by employee column."""
     try:
+        if _storage_is_db():
+            from src.storage import get_store
+
+            await get_store().memory.upsert_fact(
+                employee=str(employee_key).strip(),
+                fact=fact_text,
+            )
+            return
         _validate_sheet_name("memory_facts")
         key = str(employee_key).strip()
         ts = datetime.now(ZoneInfo(settings.timezone)).strftime("%Y-%m-%d %H:%M:%S")

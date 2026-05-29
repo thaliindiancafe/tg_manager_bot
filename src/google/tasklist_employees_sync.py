@@ -8,6 +8,11 @@ from typing import Any
 from src.config import settings
 from src.google import sheets
 from src.google import tasks as google_tasks
+from src.storage.access import (
+    link_employee_google_tasks_id,
+    list_employees,
+    upsert_employee_row,
+)
 from src.google.oauth_credentials import oauth_configured
 from src.google.tasklist_resolve import (
     _normalize_title,
@@ -70,7 +75,7 @@ async def sync_tasklists_to_employees_sheet(
         logger.warning("sync_tasklists_to_employees: no task lists in OAuth account")
         return {"ok": True, "updated": 0, "created": 0, "tasklists": 0}
 
-    employees = await sheets.read_sheet("employees")
+    employees = await list_employees()
     available = [
         tl
         for tl in tasklists
@@ -111,9 +116,9 @@ async def sync_tasklists_to_employees_sheet(
             continue
 
         if apply:
-            merged = dict(row)
-            merged["google_tasks_id"] = list_id
-            await sheets.update_row("employees", offset + 2, merged)
+            await link_employee_google_tasks_id(
+                row, list_id, sheet_row_index=offset + 2
+            )
             updated += 1
             logger.info(
                 "sync_tasklists_to_employees: linked %r → %r (%s)",
@@ -142,9 +147,9 @@ async def sync_tasklists_to_employees_sheet(
                 used_list_ids.add(list_id)
                 break
             if apply:
-                merged = dict(row)
-                merged["google_tasks_id"] = list_id
-                await sheets.update_row("employees", offset + 2, merged)
+                await link_employee_google_tasks_id(
+                    row, list_id, sheet_row_index=offset + 2
+                )
                 updated += 1
             used_list_ids.add(list_id)
             if apply:
@@ -153,7 +158,7 @@ async def sync_tasklists_to_employees_sheet(
 
     created = 0
     if auto_register_from_lists:
-        employees = await sheets.read_sheet("employees")
+        employees = await list_employees()
         for tl in available:
             list_id = str(tl.get("id", "")).strip()
             list_title = str(tl.get("title", "")).strip()
@@ -167,16 +172,9 @@ async def sync_tasklists_to_employees_sheet(
                 continue
 
             if apply:
-                await sheets.append_row(
-                    "employees",
-                    {
-                        "name": list_title,
-                        "telegram_user_id": "",
-                        "username": "",
-                        "role": "",
-                        "google_tasks_id": list_id,
-                        "active": "true",
-                    },
+                await upsert_employee_row(
+                    name=list_title,
+                    google_tasks_id=list_id,
                 )
                 logger.info(
                     "sync_tasklists_to_employees: new employees row from list %r",

@@ -15,6 +15,11 @@ from src.agent.knowledge.extract import extract_text_from_drive_file
 from src.config import settings
 from src.google import drive as google_drive
 from src.google import sheets
+from src.storage.access import (
+    list_knowledge_sources,
+    replace_knowledge_chunks,
+    upsert_knowledge_source_row,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +44,6 @@ def _find_source_by_drive_id(
     return None
 
 
-async def _delete_chunks_for_source(source_id: str) -> None:
-    rows = await sheets.read_sheet("knowledge_chunks")
-    to_delete = [
-        offset + 2
-        for offset, row in enumerate(rows)
-        if str(row.get("source_id", "")).strip() == source_id
-    ]
-    for row_index in sorted(to_delete, reverse=True):
-        await sheets.delete_row("knowledge_chunks", row_index)
-
-
 async def index_drive_file(
     file_meta: dict[str, Any],
     existing_sources: list[dict[str, Any]] | None = None,
@@ -65,9 +59,7 @@ async def index_drive_file(
     if any(mime_type.startswith(p) for p in _SKIP_MIME_PREFIXES):
         return {"ok": False, "skipped": True, "reason": "unsupported mime", "title": title}
 
-    sources = existing_sources if existing_sources is not None else await sheets.read_sheet(
-        "knowledge_sources"
-    )
+    sources = existing_sources if existing_sources is not None else await list_knowledge_sources()
     existing = _find_source_by_drive_id(sources, drive_file_id)
     source_id = str(existing.get("source_id", "")).strip() if existing else str(uuid.uuid4())
 
@@ -86,7 +78,7 @@ async def index_drive_file(
             "chunk_count": "0",
             "error": err[:500],
         }
-        await sheets.upsert_knowledge_source_row(source_id, row, existing)
+        await upsert_knowledge_source_row(source_id, row, existing)
         return {"ok": False, "title": title, "error": err}
 
     if not text.strip():
@@ -106,20 +98,15 @@ async def index_drive_file(
             "index_drive_file: embedding count mismatch file=%s", drive_file_id
         )
 
-    await _delete_chunks_for_source(source_id)
     delete_embeddings(source_id)
     if vectors:
         save_embeddings(source_id, vectors)
 
-    for idx, chunk in enumerate(chunks):
-        await sheets.append_row(
-            "knowledge_chunks",
-            {
-                "source_id": source_id,
-                "chunk_index": str(idx),
-                "text": chunk[:8000],
-            },
-        )
+    chunk_rows = [
+        {"chunk_index": idx, "text": chunk[:8000]}
+        for idx, chunk in enumerate(chunks)
+    ]
+    await replace_knowledge_chunks(source_id, chunk_rows)
 
     source_row = {
         "source_id": source_id,
@@ -132,7 +119,7 @@ async def index_drive_file(
         "chunk_count": str(len(chunks)),
         "error": "",
     }
-    await sheets.upsert_knowledge_source_row(source_id, source_row, existing)
+    await upsert_knowledge_source_row(source_id, source_row, existing)
 
     return {
         "ok": True,
@@ -159,7 +146,7 @@ async def sync_drive_knowledge_folder(folder_id: str | None = None) -> dict[str,
 
     try:
         files = await google_drive.list_folder(fid)
-        sources = await sheets.read_sheet("knowledge_sources")
+        sources = await list_knowledge_sources()
 
         for meta in files:
             mime = str(meta.get("mime_type", ""))
@@ -171,7 +158,7 @@ async def sync_drive_knowledge_folder(folder_id: str | None = None) -> dict[str,
                     skipped += 1
                 elif result.get("ok"):
                     indexed += 1
-                    sources = await sheets.read_sheet("knowledge_sources")
+                    sources = await list_knowledge_sources()
                 else:
                     errors.append(f"{result.get('title', '?')}: {result.get('error', '?')}")
             except Exception as exc:

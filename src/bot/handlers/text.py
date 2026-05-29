@@ -23,6 +23,14 @@ from src.bot.group_gate import should_process_group_message
 from src.bot.private_agent_message import with_private_telegram_context
 from src.bot.reply_format import send_bot_reply
 from src.google import sheets
+from src.storage import get_store
+from src.config import settings
+from src.bot.chat_logging import log_incoming_message
+from src.bot.task_import_safe_mode import (
+    looks_like_import_request,
+    start_safe_import,
+    try_handle_awaiting_username,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +50,13 @@ async def handle_text_message(message: Message) -> None:
         if not text:
             return
 
+        # Log group transcript for Mira-like task extraction (DB backend).
+        await log_incoming_message(message)
+
+        # Pending @username for unassigned import tasks (works without @бота in group).
+        if await try_handle_awaiting_username(message):
+            return
+
         if not await should_process_group_message(message):
             return
 
@@ -52,6 +67,14 @@ async def handle_text_message(message: Message) -> None:
         async with typing_while(message.bot, chat_id, message_thread_id=thread_id):
             if await maybe_offer_task_choice(message):
                 return
+
+            # Safe import: preview tasks from last 7 days and ask confirmation.
+            if looks_like_import_request(text):
+                preview = await start_safe_import(message, since_days=7)
+                if preview is not None:
+                    preview_text, kb = preview
+                    await message.answer(preview_text, reply_markup=kb)
+                    return
 
             register_reply = await try_reply_employee_register_bulk(text)
             if register_reply is not None:
@@ -72,7 +95,10 @@ async def handle_text_message(message: Message) -> None:
             if fast_reply is not None:
                 reply = fast_reply
             else:
-                history = await sheets.get_recent_history(chat_id, limit=30)
+                if (getattr(settings, "storage_backend", "sheets") or "sheets").strip().lower() == "db":
+                    history = await get_store().memory.get_recent_history(chat_id, limit=30)
+                else:
+                    history = await sheets.get_recent_history(chat_id, limit=30)
                 routed = text
                 if message.chat.type == ChatType.PRIVATE:
                     uid = message.from_user.id if message.from_user else chat_id

@@ -76,7 +76,7 @@ def _format_events_reply(
     if task_lines:
         lines.extend(task_lines)
     elif sheet_task_rows:
-        lines.append("Поручения в боте (Sheets):")
+        lines.append("Поручения в боте:")
     for row in sheet_task_rows:
         title = str(row.get("title", "")).strip() or "(без названия)"
         assignee = str(row.get("assigned_to", "")).strip()
@@ -109,7 +109,7 @@ def _format_events_reply(
             title = str(row.get("title", "")).strip() or "(без названия)"
             time_str = str(row.get("time", "")).strip()
             suffix = f" {time_str}" if time_str else ""
-            lines.append(f"• {title}{suffix} — из таблицы events")
+            lines.append(f"• {title}{suffix}")
     return "\n".join(lines)
 
 

@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from src.agent import tools as agent_tools
 from src.config import settings
-from src.google import sheets
+from src.storage.access import list_employees
 from src.utils.employee_name_match import (
     build_name_lookup,
     inflected_name_forms,
@@ -101,7 +101,8 @@ async def _employee_by_telegram_user_id(telegram_user_id: int) -> str | None:
     from src.google.tasklist_resolve import is_manager_employee_row
 
     tid = str(int(telegram_user_id))
-    for row in await sheets.read_sheet("employees"):
+    employees = await list_employees()
+    for row in employees:
         if str(row.get("telegram_user_id", "")).strip() != tid:
             continue
         name = str(row.get("name", "")).strip()
@@ -110,7 +111,8 @@ async def _employee_by_telegram_user_id(telegram_user_id: int) -> str | None:
 
     manager_tid = (settings.google_tasks_manager_telegram_id or "").strip()
     if manager_tid and tid == manager_tid:
-        for row in await sheets.read_sheet("employees"):
+        employees = await list_employees()
+        for row in employees:
             if is_manager_employee_row(row):
                 name = str(row.get("name", "")).strip()
                 if name:
@@ -137,7 +139,7 @@ def _format_tasks_reply(data: dict[str, Any], *, all_open: bool = False) -> str:
 
     if not data.get("employee_found"):
         hint = str(data.get("hint", "")).strip()
-        return hint or "Сотрудник не найден в таблице employees."
+        return hint or "Сотрудник не найден в справочнике."
 
     err = data.get("google_tasks_error")
     if err:
@@ -178,7 +180,7 @@ def _format_tasks_reply(data: dict[str, Any], *, all_open: bool = False) -> str:
     if sheet_rows:
         if google_rows or google_undated:
             lines.append("")
-        lines.append("Поручения в боте (Sheets):")
+        lines.append("Поручения в боте:")
         for row in sheet_rows:
             title = str(row.get("title", "")).strip() or "(без названия)"
             tid = str(row.get("task_id", "")).strip()
@@ -202,7 +204,7 @@ async def try_reply_employee_tasks_query(
     if not _looks_like_task_list_query(text):
         return None
 
-    rows = await sheets.read_sheet("employees")
+    rows = await list_employees()
     names = [str(row.get("name", "")).strip() for row in rows]
     lookup = build_name_lookup(names)
 

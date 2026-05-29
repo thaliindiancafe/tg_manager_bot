@@ -20,6 +20,7 @@ from src.bot.router import main_router
 from src.agent import tools as agent_tools
 from src.config import settings
 from src.scheduler.runner import start_scheduler, stop_scheduler
+from src.storage import get_store
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,11 @@ async def _handle_webhook(request: Request) -> Response:
 
 @asynccontextmanager
 async def _webhook_lifespan(_: Starlette):
+    if getattr(settings, "storage_backend", "sheets").strip().lower() == "db":
+        store = get_store()
+        init = getattr(store, "init", None)
+        if callable(init):
+            await init()
     start_scheduler(bot)
     await bot.set_webhook(
         url=settings.webhook_url,
@@ -87,6 +93,11 @@ def _create_webhook_app() -> Starlette:
 
 async def _run_polling() -> None:
     logger.info("Starting bot in polling mode (DEV_MODE=true)")
+    if getattr(settings, "storage_backend", "sheets").strip().lower() == "db":
+        store = get_store()
+        init = getattr(store, "init", None)
+        if callable(init):
+            await init()
     start_scheduler(bot)
     try:
         await dp.start_polling(bot)

@@ -67,6 +67,13 @@ _ENV_ALIASES: dict[str, str] = {
     "calendar_events_id": "CALENDAR_EVENTS_ID",
     "calendar_primary_label": "CALENDAR_PRIMARY_LABEL",
     "calendar_events_label": "CALENDAR_EVENTS_LABEL",
+    "storage_backend": "STORAGE_BACKEND",
+    "database_url": "DATABASE_URL",
+    "db_pool_size": "DB_POOL_SIZE",
+    "db_max_overflow": "DB_MAX_OVERFLOW",
+    "database_ssl_verify": "DATABASE_SSL_VERIFY",
+    "calendar_only_mode": "CALENDAR_ONLY_MODE",
+    "tasks_api_primary": "TASKS_API_PRIMARY",
 }
 
 
@@ -83,7 +90,7 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default="", validation_alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o-mini", validation_alias="OPENAI_MODEL")
     gemini_api_key: str = Field(default="", validation_alias="GEMINI_API_KEY")
-    spreadsheet_id: str = Field(validation_alias="SPREADSHEET_ID")
+    spreadsheet_id: str = Field(default="", validation_alias="SPREADSHEET_ID")
     source_spreadsheet_id: str = Field(validation_alias="SOURCE_SPREADSHEET_ID")
     source_schedule_sheet_name: str = Field(
         default="График Текущий месяц",
@@ -297,6 +304,20 @@ class Settings(BaseSettings):
         validation_alias="CALENDAR_EVENTS_LABEL",
     )
 
+    # Storage backend
+    storage_backend: str = Field(default="sheets", validation_alias="STORAGE_BACKEND")
+    database_url: str = Field(default="", validation_alias="DATABASE_URL")
+    db_pool_size: int = Field(default=5, ge=1, le=50, validation_alias="DB_POOL_SIZE")
+    db_max_overflow: int = Field(default=5, ge=0, le=100, validation_alias="DB_MAX_OVERFLOW")
+    database_ssl_verify: bool = Field(
+        default=True,
+        validation_alias="DATABASE_SSL_VERIFY",
+    )
+
+    # Direct API modes (reduce mirrors)
+    calendar_only_mode: bool = Field(default=False, validation_alias="CALENDAR_ONLY_MODE")
+    tasks_api_primary: bool = Field(default=False, validation_alias="TASKS_API_PRIMARY")
+
     @field_validator("llm_provider", mode="before")
     @classmethod
     def _normalize_llm_provider(cls, value: object) -> str:
@@ -306,7 +327,6 @@ class Settings(BaseSettings):
 
     @field_validator(
         "bot_token",
-        "spreadsheet_id",
         "source_spreadsheet_id",
         "google_credentials_json",
         "webhook_url",
@@ -324,6 +344,13 @@ class Settings(BaseSettings):
                 return None
             return stripped
         return value
+
+    @field_validator("spreadsheet_id", mode="before")
+    @classmethod
+    def _strip_spreadsheet_id(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
 
     @field_validator("source_schedule_sheet_name", mode="before")
     @classmethod
@@ -461,6 +488,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 "GEMINI_API_KEY нужен для эмбеддингов базы знаний (KNOWLEDGE_SYNC). "
                 "Задайте ключ или отключите KNOWLEDGE_SYNC_ENABLED=false."
+            )
+        backend = (self.storage_backend or "sheets").strip().lower()
+        if backend == "db":
+            if not self.database_url.strip():
+                raise ValueError(
+                    "DATABASE_URL обязателен при STORAGE_BACKEND=db."
+                )
+        elif not self.spreadsheet_id.strip():
+            raise ValueError(
+                "SPREADSHEET_ID обязателен при STORAGE_BACKEND=sheets."
             )
         return self
 

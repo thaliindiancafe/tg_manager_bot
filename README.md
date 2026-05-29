@@ -23,7 +23,7 @@ Telegram AI-агент для управления командой рестор
 ### 1. Клонировать репозиторий
 
 ```bash
-git clone https://github.com/YOUR_USER/tg-manager-agent.git
+git clone https://github.com/thaliindiancafe/tg_manager_bot.git tg-manager-agent
 cd tg-manager-agent
 ```
 

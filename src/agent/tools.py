@@ -46,9 +46,9 @@ from src.google.calendar_targets import (
     events_calendar_id,
 )
 from src.google import drive as google_drive
-from src.google import sheets
 from src.google import tasks as google_tasks
 from src.google.oauth_credentials import oauth_configured
+from src.storage import get_store
 
 logger = logging.getLogger(__name__)
 
@@ -73,14 +73,42 @@ def _normalize_username(value: str) -> str:
     return (value or "").strip().lstrip("@").lower()
 
 
+def _use_db_store() -> bool:
+    return (getattr(settings, "storage_backend", "sheets") or "sheets").strip().lower() == "db"
+
+
+async def _employees_rows() -> list[dict[str, Any]]:
+    if _use_db_store():
+        return await get_store().employees.list_employees()
+    from src.google import sheets  # local import to avoid accidental db usage
+
+    return await sheets.read_sheet("employees")
+
+
+async def _tasks_rows() -> list[dict[str, Any]]:
+    if _use_db_store():
+        return await get_store().tasks.list_tasks()
+    from src.google import sheets  # local import
+
+    return await sheets.read_sheet("tasks")
+
+
+async def _schedule_rows() -> list[dict[str, Any]]:
+    if _use_db_store():
+        return await get_store().schedule.list_schedule()
+    from src.google import sheets  # local import
+
+    return await sheets.read_sheet("schedule")
+
+
 async def _employee_row_by_telegram_id(
     telegram_user_id: str,
 ) -> tuple[int | None, dict[str, Any] | None]:
     tid = str(telegram_user_id).strip()
-    rows = await sheets.read_sheet("employees")
+    rows = await _employees_rows()
     for offset, row in enumerate(rows):
         if str(row.get("telegram_user_id", "")).strip() == tid:
-            return offset + 2, row
+            return (offset + 2) if not _use_db_store() else None, row
     return None, None
 
 
@@ -92,7 +120,7 @@ async def _resolve_employee_row(
         return None, None, EmployeeResolveResult(
             ok=False, error="Пустой идентификатор сотрудника"
         )
-    rows = await sheets.read_sheet("employees")
+    rows = await _employees_rows()
 
     if is_shift_unpacking_query(q):
         result = await resolve_shift_unpacking_from_schedule(rows)
@@ -104,7 +132,7 @@ async def _resolve_employee_row(
     target = result.canonical_name.strip().lower()
     for offset, row in enumerate(rows):
         if str(row.get("name", "")).strip().lower() == target:
-            return offset + 2, row, result
+            return (offset + 2) if not _use_db_store() else None, row, result
     return None, None, EmployeeResolveResult(
         ok=False, error="Строка employees не найдена после сопоставления"
     )
@@ -122,7 +150,7 @@ async def _employee_row_by_name_insensitive(
 async def build_staff_roles_section() -> str:
     """Block for system prompt: names, roles, @username."""
     try:
-        rows = await sheets.read_sheet("employees")
+        rows = await _employees_rows()
         body = format_staff_directory(rows)
         return (
             "## Справочник сотрудников (employees)\n"
@@ -130,7 +158,7 @@ async def build_staff_roles_section() -> str:
             "Для **send_dm_to_employee**, **delegate_private_reminder**, **create_task** "
             "в поле имени можно передать: **имя** (Гири), **@username** (Girl5719) "
             "или **должность** (су-шеф, шеф, бариста…). "
-            "Должности — колонка **role** в employees. "
+            "Должности — поле **role** в справочнике сотрудников. "
             "**Помощник на смене** / разбор товара — кто сегодня в графике (schedule, блок "
             f"{getattr(settings, 'schedule_unpacking_roles', 'Kleener')}), не фиксированное имя."
         )
@@ -143,10 +171,10 @@ async def get_employee_directory() -> dict[str, Any]:
     """
     Список активных сотрудников: имя, должность (role), username, есть ли Telegram.
 
-    Вызывай, если нужно понять, кому поручение (шеф, су-шеф) или кого нет в таблице.
+    Вызывай, если нужно понять, кому поручение (шеф, су-шеф) или кого нет в справочнике.
     """
     try:
-        rows = await sheets.read_sheet("employees")
+        rows = await _employees_rows()
         staff: list[dict[str, Any]] = []
         for row in rows:
             if str(row.get("active", "true")).strip().lower() in {
@@ -173,7 +201,7 @@ async def get_employee_directory() -> dict[str, Any]:
             "employees": staff,
             "hint": (
                 "Поручение: delegate_private_reminder(employee_name='су-шеф'|'Гири'|'помощник на смене', …). "
-                "role в employees: Гири→су-шеф, Пракаш→шеф. "
+                "role в справочнике: Гири→су-шеф, Пракаш→шеф. "
                 "«помощник на смене» — из графика на сегодня (schedule, Kleener)."
             ),
         }
@@ -189,12 +217,13 @@ async def _employee_rows_by_username(
     u = _normalize_username(username)
     if not u:
         return []
-    rows = await sheets.read_sheet("employees")
-    out: list[tuple[int, dict[str, Any]]] = []
+    rows = await _employees_rows()
+    out: list[tuple[int | None, dict[str, Any]]] = []
     for offset, row in enumerate(rows):
         cell = _normalize_username(str(row.get("username", "")))
         if cell == u:
-            out.append((offset + 2, row))
+            sheet_idx = (offset + 2) if not _use_db_store() else None
+            out.append((sheet_idx, row))
     return out
 
 
@@ -306,26 +335,42 @@ def _append_proof_report_block(notes: str, report: dict[str, Any]) -> str:
 
 async def _set_task_status(task_id: str, status: str) -> None:
     row_index, row = await _find_sheet_row_index("tasks", "task_id", task_id)
-    if row is None or row_index is None:
+    if row is None:
+        raise ValueError(f"Задача с task_id={task_id!r} не найдена")
+    if _use_db_store():
+        await get_store().tasks.update_task_fields(task_id, {"status": status})
+        return
+    if row_index is None:
         raise ValueError(f"Задача с task_id={task_id!r} не найдена")
     updated = dict(row)
     updated["status"] = status
+    from src.google import sheets
+
     await sheets.update_row("tasks", row_index, updated)
 
 
 async def set_pending_proof_task(telegram_user_id: int, task_id: str) -> None:
     key = f"{PENDING_PROOF_FACT_PREFIX}{int(telegram_user_id)}"
+    if _use_db_store():
+        await get_store().memory.upsert_fact(employee=key, fact=str(task_id).strip())
+        return
+    from src.google import sheets
+
     await sheets.upsert_memory_fact_row(key, str(task_id).strip())
 
 
 async def pop_pending_proof_task(telegram_user_id: int) -> str | None:
     key = f"{PENDING_PROOF_FACT_PREFIX}{int(telegram_user_id)}"
-    facts = await sheets.read_sheet("memory_facts")
+    from src.google.sheets import get_facts
+
+    facts = await get_facts()
     for row in facts:
         if str(row.get("employee", "")).strip() == key:
             tid = str(row.get("fact", "")).strip()
             if tid:
-                await sheets.upsert_memory_fact_row(key, "")
+                from src.google.sheets import upsert_memory_fact_row
+
+                await upsert_memory_fact_row(key, "")
             return tid or None
     return None
 
@@ -343,11 +388,26 @@ async def _find_sheet_row_index(
     column: str,
     value: str,
 ) -> tuple[int | None, dict[str, Any] | None]:
-    rows = await sheets.read_sheet(sheet_name)
+    if _use_db_store():
+        if sheet_name == "employees":
+            rows = await _employees_rows()
+        elif sheet_name == "tasks":
+            rows = await _tasks_rows()
+        elif sheet_name == "schedule":
+            rows = await _schedule_rows()
+        else:
+            # Non-migrated sheets remain in Google Sheets during transition
+            from src.google import sheets
+
+            rows = await sheets.read_sheet(sheet_name)
+    else:
+        from src.google import sheets
+
+        rows = await sheets.read_sheet(sheet_name)
     target = str(value).strip()
     for offset, row in enumerate(rows):
         if str(row.get(column, "")).strip() == target:
-            return offset + 2, row
+            return (offset + 2) if not _use_db_store() else None, row
     return None, None
 
 
@@ -356,20 +416,51 @@ async def _get_employee_tasklist_id(
     *,
     auto_create: bool = True,
 ) -> str | None:
-    from src.google.tasklist_resolve import (
-        ensure_tasklist_for_employee_row,
-        resolve_tasklist_for_employee_row,
-    )
-
     row_idx, row = await _employee_row_by_name_insensitive(employee_name)
     if not row:
         return None
-    if auto_create and row_idx is not None:
-        resolved = await ensure_tasklist_for_employee_row(row_idx, row)
-        if resolved:
-            return resolved[0]
-    resolved = await resolve_tasklist_for_employee_row(row)
-    return resolved[0] if resolved else None
+    # DB backend cannot rely on Sheets row index updates; implement a local resolver.
+    existing = str(row.get("google_tasks_id", "")).strip()
+    if existing:
+        return existing
+
+    if not (auto_create and settings.google_tasks_use_oauth and oauth_configured()):
+        return None
+
+    # Try find tasklist by employee name, else create.
+    try:
+        lists = await google_tasks.list_tasklists()
+        target = employee_name.strip().lower()
+        matched = next(
+            (tl for tl in lists if str(tl.get("title", "")).strip().lower() == target),
+            None,
+        )
+        if matched and str(matched.get("id", "")).strip():
+            tasklist_id = str(matched["id"]).strip()
+        else:
+            created = await google_tasks.create_tasklist(employee_name.strip())
+            tasklist_id = str(created.get("id", "")).strip()
+        if tasklist_id:
+            if _use_db_store():
+                await get_store().employees.upsert_employee(
+                    name=str(row.get("name", "")).strip() or employee_name.strip(),
+                    telegram_user_id=str(row.get("telegram_user_id", "")).strip(),
+                    username=str(row.get("username", "")).strip(),
+                    role=str(row.get("role", "")).strip(),
+                    google_tasks_id=tasklist_id,
+                    active=str(row.get("active", "true")).strip(),
+                )
+            else:
+                from src.google.tasklist_resolve import ensure_tasklist_for_employee_row
+
+                if row_idx is not None:
+                    await ensure_tasklist_for_employee_row(row_idx, row)
+            return tasklist_id
+    except Exception as exc:
+        logger.warning("Could not ensure tasklist for %s: %s", employee_name, exc)
+        return None
+
+    return None
 
 
 async def _sync_google_task_complete(assigned_to: str, notes: str) -> None:
@@ -451,7 +542,7 @@ async def get_schedule_for_dates(
     dates: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Смены из листа schedule только для указанных календарных дней.
+    Смены из schedule (Supabase при STORAGE_BACKEND=db) за указанные календарные дни.
 
     preset: today | tomorrow | yesterday | none — относительный день в часовом поясе приложения.
     dates: дополнительные даты в формате YYYY-MM-DD (например конкретный день недели).
@@ -462,7 +553,7 @@ async def get_schedule_for_dates(
     """
     try:
         targets = _collect_schedule_target_dates(preset, dates)
-        schedule = await sheets.read_sheet("schedule")
+        schedule = await _schedule_rows()
         return [
             row
             for row in schedule
@@ -484,7 +575,7 @@ async def get_tasks_for_dates(
     dates: list[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Задачи на указанные дни: Google Tasks (как в календаре Gmail) + лист tasks в Sheets.
+    Задачи на указанные дни: Google Tasks API (OAuth) + метаданные бота в БД/Sheets.
 
     preset: today | tomorrow | yesterday | none — как get_schedule_for_dates.
     dates: дополнительные YYYY-MM-DD.
@@ -516,20 +607,21 @@ async def get_tasks_for_dates(
                 "после scripts/google_tasks_oauth_setup.py"
             )
 
-        sheet_rows: list[dict[str, Any]] = []
-        for row in await sheets.read_sheet("tasks"):
+        bot_rows: list[dict[str, Any]] = []
+        for row in await _tasks_rows():
             due = _normalize_schedule_date_cell(row.get("due_date"))
             if due not in target_set:
                 continue
             if is_closed_status(str(row.get("status", "")).strip()):
                 continue
-            sheet_rows.append(row)
+            bot_rows.append(row)
 
         return {
             "dates": targets,
             "google_tasks": google_tasks_rows,
             "google_tasks_error": google_error,
-            "sheets_tasks": sheet_rows,
+            "bot_tasks": bot_rows,
+            "sheets_tasks": bot_rows,
         }
     except Exception as exc:
         logger.error(
@@ -617,7 +709,7 @@ async def get_employee_tasks_for_dates(
 
         sheet_rows: list[dict[str, Any]] = []
         name_key = canonical_name.strip().lower()
-        for row in await sheets.read_sheet("tasks"):
+        for row in await _tasks_rows():
             assigned = str(row.get("assigned_to", "")).strip().lower()
             if assigned != name_key:
                 continue
@@ -717,7 +809,7 @@ async def get_employee_all_open_tasks(employee_name: str) -> dict[str, Any]:
 
         name_key = canonical_name.strip().lower()
         sheet_rows: list[dict[str, Any]] = []
-        for row in await sheets.read_sheet("tasks"):
+        for row in await _tasks_rows():
             if str(row.get("assigned_to", "")).strip().lower() != name_key:
                 continue
             if is_closed_status(str(row.get("status", "")).strip()):
@@ -754,7 +846,7 @@ async def get_employee_tasks(employee_name: str) -> list[dict[str, Any]]:
     """
     try:
         name = employee_name.strip().lower()
-        tasks = await sheets.read_sheet("tasks")
+        tasks = await _tasks_rows()
         return [
             row
             for row in tasks
@@ -798,7 +890,7 @@ async def get_open_tasks_for_telegram_user(
                 "open_tasks": [],
             }
         target = name.strip().lower()
-        tasks = await sheets.read_sheet("tasks")
+        tasks = await _tasks_rows()
         open_tasks: list[dict[str, Any]] = []
         for t in tasks:
             assigned = str(t.get("assigned_to", "")).strip().lower()
@@ -920,7 +1012,12 @@ async def complete_task(task_id: str) -> dict[str, Any]:
 
         updated = dict(row)
         updated["status"] = TASK_STATUS_DONE
-        await sheets.update_row("tasks", row_index, updated)
+        if _use_db_store():
+            await get_store().tasks.update_task_fields(task_id, {"status": TASK_STATUS_DONE})
+        else:
+            from src.google import sheets
+
+            await sheets.update_row("tasks", row_index, updated)
 
         assigned_to = str(row.get("assigned_to", "")).strip()
         notes = str(row.get("notes", ""))
@@ -995,7 +1092,14 @@ async def _apply_proof_evaluation(
     updated = dict(row)
     updated["notes"] = notes
     updated["status"] = new_status
-    await sheets.update_row("tasks", row_index, updated)
+    if _use_db_store():
+        await get_store().tasks.update_task_fields(
+            task_id, {"notes": notes, "status": new_status}
+        )
+    else:
+        from src.google import sheets
+
+        await sheets.update_row("tasks", row_index, updated)
 
     summary = format_proof_summary_ru(items) if items else "Отчёт принят, ожидает проверки."
     result: dict[str, Any] = {
@@ -1128,7 +1232,12 @@ async def approve_task(task_id: str) -> dict[str, Any]:
 
         updated = dict(row)
         updated["status"] = TASK_STATUS_DONE
-        await sheets.update_row("tasks", row_index, updated)
+        if _use_db_store():
+            await get_store().tasks.update_task_fields(task_id.strip(), {"status": TASK_STATUS_DONE})
+        else:
+            from src.google import sheets
+
+            await sheets.update_row("tasks", row_index, updated)
 
         assigned_to = str(row.get("assigned_to", "")).strip()
         notes = str(row.get("notes", ""))
@@ -1176,7 +1285,15 @@ async def reject_task_proof(task_id: str, comment: str = "") -> dict[str, Any]:
         updated = dict(row)
         updated["notes"] = notes[:12000]
         updated["status"] = TASK_STATUS_AWAITING_PROOF
-        await sheets.update_row("tasks", row_index, updated)
+        if _use_db_store():
+            await get_store().tasks.update_task_fields(
+                task_id.strip(),
+                {"notes": notes[:12000], "status": TASK_STATUS_AWAITING_PROOF},
+            )
+        else:
+            from src.google import sheets
+
+            await sheets.update_row("tasks", row_index, updated)
 
         assigned_to = str(row.get("assigned_to", "")).strip()
         if assigned_to:
@@ -1229,7 +1346,14 @@ async def postpone_task(task_id: str, new_due_date: str) -> dict[str, Any]:
 
         updated = dict(row)
         updated["due_date"] = new_due_date.strip()
-        await sheets.update_row("tasks", row_index, updated)
+        if _use_db_store():
+            await get_store().tasks.update_task_fields(
+                task_id, {"due_date": new_due_date.strip()}
+            )
+        else:
+            from src.google import sheets
+
+            await sheets.update_row("tasks", row_index, updated)
 
         assigned_to = str(row.get("assigned_to", "")).strip()
         notes = str(row.get("notes", ""))
@@ -1261,11 +1385,11 @@ async def create_task(
     notes: str,
 ) -> dict[str, Any]:
     """
-    Создать новую задачу в таблице tasks.
+    Создать задачу в Google Tasks (список исполнителя) и сохранить метаданные у бота.
 
     due_date в формате YYYY-MM-DD.
-    assigned_to — имя, @username или должность (шеф, су-шеф) как в employees.
-    Дублировать в Google Tasks (OAuth): при отсутствии списка — найти по имени или создать новый.
+    assigned_to — имя, @username или должность (шеф, су-шеф) как в справочнике сотрудников.
+    В ответе есть verification_url — ссылку нужно отправить пользователю для проверки.
     """
     try:
         _, _, resolved = await _resolve_employee_row(assigned_to)
@@ -1281,6 +1405,7 @@ async def create_task(
 
         tasklist_id = await _get_employee_tasklist_id(assignee, auto_create=True)
         google_synced = False
+        google_task_id = ""
         if tasklist_id:
             try:
                 google_task_id = await google_tasks.create_task(
@@ -1303,18 +1428,35 @@ async def create_task(
                 assignee,
             )
 
-        await sheets.append_row(
-            "tasks",
-            {
-                "task_id": task_id,
-                "title": title,
-                "assigned_to": assignee,
-                "due_date": due_date,
-                "status": "pending",
-                "reminder_count": "0",
-                "notes": row_notes,
-            },
-        )
+        task_row: dict[str, Any] = {
+            "task_id": task_id,
+            "title": title,
+            "assigned_to": assignee,
+            "due_date": due_date,
+            "status": "pending",
+            "reminder_count": "0",
+            "notes": row_notes,
+            "google_task_id": google_task_id,
+            "google_tasklist_id": tasklist_id or "",
+        }
+        if _use_db_store():
+            await get_store().tasks.upsert_task(task_row)
+        else:
+            from src.google import sheets
+
+            await sheets.append_row("tasks", task_row)
+
+        from src.utils.google_links import google_task_url
+
+        verification_url = ""
+        if google_synced and google_task_id and tasklist_id:
+            verification_url = google_task_url(
+                tasklist_id=tasklist_id,
+                task_id=google_task_id,
+            )
+        elif tasklist_id:
+            verification_url = google_task_url(tasklist_id=tasklist_id)
+
         return {
             "task_id": task_id,
             "title": title,
@@ -1324,6 +1466,7 @@ async def create_task(
             "due_date": due_date,
             "status": "pending",
             "google_tasks_synced": google_synced,
+            "verification_url": verification_url,
         }
     except Exception as exc:
         logger.error(
@@ -1343,32 +1486,45 @@ async def create_event(
     description: str,
 ) -> dict[str, Any]:
     """
-    Создать мероприятие в Google Calendar (календарь «Мероприятия») и сразу в лист events.
+    Создать мероприятие в Google Calendar (календарь «Мероприятия»).
 
     Обязательно вызывай, когда просят создать/запланировать мероприятие, встречу, событие.
     date: YYYY-MM-DD, time: HH:MM (если время не сказано — разумное по смыслу).
-    Используй для встреч, мероприятий, праздников, событий ресторана.
+    В ответе verification_url — ссылку на событие нужно отправить пользователю.
     """
     try:
         write_calendar_id = events_calendar_id()
-        event_id = await google_calendar.create_event(
+        created = await google_calendar.create_event(
             write_calendar_id,
             title,
             date,
             time,
             description,
         )
+        event_id = str(created.get("event_id", "")).strip()
+        html_link = str(created.get("html_link", "")).strip()
 
-        await sheets.append_row(
-            "events",
-            {
-                "title": title,
-                "date": date,
-                "time": time,
-                "description": description,
-                "calendar_id": event_id,
-                "created_by": "bot",
-            },
+        if not _use_db_store() and not getattr(settings, "calendar_only_mode", False):
+            from src.google import sheets
+
+            await sheets.append_row(
+                "events",
+                {
+                    "title": title,
+                    "date": date,
+                    "time": time,
+                    "description": description,
+                    "calendar_id": event_id,
+                    "created_by": "bot",
+                },
+            )
+
+        from src.utils.google_links import pick_calendar_event_url
+
+        verification_url = pick_calendar_event_url(
+            calendar_id=write_calendar_id,
+            event_id=event_id,
+            html_link=html_link,
         )
         return {
             "title": title,
@@ -1376,6 +1532,7 @@ async def create_event(
             "time": time,
             "calendar_event_id": event_id,
             "google_calendar_id": write_calendar_id,
+            "verification_url": verification_url,
         }
     except Exception as exc:
         logger.error(
@@ -1394,8 +1551,8 @@ async def get_events_for_dates(
     dates: list[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Мероприятия из Google Calendar (основной + «Мероприятия») и листа events
-    только за указанные дни.
+    Мероприятия напрямую из Google Calendar API (основной + «Мероприятия»)
+    за указанные дни. Лист events в Sheets не используется при STORAGE_BACKEND=db.
 
     preset: today | tomorrow | yesterday | none — как в get_schedule_for_dates.
     dates: дополнительные YYYY-MM-DD.
@@ -1412,12 +1569,16 @@ async def get_events_for_dates(
             targets,
         )
 
-        sheet_events = await sheets.read_sheet("events")
-        sheet_for_dates = [
-            row
-            for row in sheet_events
-            if _normalize_schedule_date_cell(row.get("date")) in set(targets)
-        ]
+        sheet_for_dates: list[dict[str, Any]] = []
+        if not _use_db_store() and not getattr(settings, "calendar_only_mode", False):
+            from src.google import sheets
+
+            sheet_events = await sheets.read_sheet("events")
+            sheet_for_dates = [
+                row
+                for row in sheet_events
+                if _normalize_schedule_date_cell(row.get("date")) in set(targets)
+            ]
 
         sheet_event_ids = {
             str(row.get("calendar_id", "")).strip()
@@ -1435,11 +1596,12 @@ async def get_events_for_dates(
             "calendars_queried": [
                 {"id": cid, "label": label} for cid, label in read_targets
             ],
+            "events": calendar_live,
             "calendar_live": calendar_live,
             "sheet": sheet_for_dates,
             "note": (
-                "sheet — журнал (утренний синк + create_event); calendar_live — "
-                "события из API, которых ещё нет в sheet за эти даты"
+                "events/calendar_live — только Google Calendar API; "
+                "sheet пуст при STORAGE_BACKEND=db / CALENDAR_ONLY_MODE"
             ),
         }
     except Exception as exc:
@@ -1452,6 +1614,150 @@ async def get_events_for_dates(
         )
         raise
 
+
+async def extract_tasks_from_chat(
+    chat_id: int,
+    since_days: int = 7,
+    limit_messages: int = 1500,
+) -> dict[str, Any]:
+    """
+    Mira-like helper: scan group chat transcript (last N days) and propose tasks.
+
+    This tool only works when STORAGE_BACKEND=db (messages are logged into chat_messages).
+    Returns a list of proposed tasks with minimal structure:
+    - title
+    - assigned_to (best-effort, from @username or name mention)
+    - evidence (message_id + short quote)
+    """
+    if not _use_db_store():
+        return {
+            "ok": False,
+            "error": "Чат-лог доступен только при STORAGE_BACKEND=db (нужно включить БД).",
+            "tasks": [],
+        }
+    try:
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(settings.timezone)
+        since_dt = datetime.now(tz) - timedelta(days=max(1, int(since_days)))
+        msgs = await get_store().chat_messages.list_chat_messages_since(
+            chat_id=int(chat_id),
+            since_dt=since_dt,
+            limit=int(limit_messages),
+        )
+        if not msgs:
+            return {"ok": True, "chat_id": int(chat_id), "since_days": since_days, "tasks": []}
+
+        from src.bot.employee_tasks_query import _find_employee_in_text
+        from src.utils.employee_name_match import build_name_lookup
+        from src.utils.task_due_hint import parse_due_date_hint
+
+        employees = await _employees_rows()
+        employee_names = [
+            str(e.get("name", "")).strip() for e in employees if str(e.get("name", "")).strip()
+        ]
+        by_username = {
+            _normalize_username(str(e.get("username", ""))): str(e.get("name", "")).strip()
+            for e in employees
+            if str(e.get("name", "")).strip() and str(e.get("username", "")).strip()
+        }
+        name_lookup = build_name_lookup(employee_names)
+
+        verb_markers = (
+            "сделай",
+            "сделать",
+            "нужно",
+            "надо",
+            "проверь",
+            "проверить",
+            "подготовь",
+            "подготовить",
+            "закажи",
+            "заказать",
+            "купить",
+            "срочно",
+            "поруч",
+        )
+        tasks: list[dict[str, Any]] = []
+        seen_msg: set[int] = set()
+        seen_title: set[str] = set()
+
+        def _norm_title(value: str) -> str:
+            t = re.sub(r"\s+", " ", (value or "").lower()).strip()
+            t = re.sub(r"[^\wа-яё\s]", "", t, flags=re.IGNORECASE)
+            return t[:80]
+
+        for m in msgs:
+            txt = (m.text or "").strip()
+            low = txt.lower()
+            if not txt or len(txt) < 6:
+                continue
+            if not any(v in low for v in verb_markers):
+                continue
+            if m.message_id in seen_msg:
+                continue
+
+            assignee = ""
+            for token in re.findall(r"@[a-zA-Z][a-zA-Z0-9_]{2,}", txt):
+                u = _normalize_username(token.lstrip("@"))
+                assignee = by_username.get(u) or ""
+                if assignee:
+                    break
+            if not assignee:
+                found = _find_employee_in_text(txt, employee_names, lookup=name_lookup)
+                assignee = found or ""
+            if not assignee:
+                from src.utils.employee_role_resolve import (
+                    resolve_employee_reference,
+                    role_to_canonical,
+                )
+
+                for token in re.findall(r"[a-zA-Zа-яА-ЯёЁ][a-zA-Zа-яА-ЯёЁ\-]{1,}", txt):
+                    if not role_to_canonical(token):
+                        continue
+                    resolved = resolve_employee_reference(token, employees)
+                    if resolved.ok and resolved.canonical_name:
+                        assignee = resolved.canonical_name
+                        break
+
+            title = re.split(r"[\n\.!?]+", txt, maxsplit=1)[0].strip()
+            title = re.sub(r"^@\w+\s*", "", title).strip()
+            title = title[:120]
+            if not title:
+                continue
+
+            title_key = _norm_title(title)
+            if title_key in seen_title:
+                continue
+            seen_msg.add(m.message_id)
+            seen_title.add(title_key)
+
+            due_date = parse_due_date_hint(txt, tz_name=settings.timezone)
+            tasks.append(
+                {
+                    "title": title,
+                    "assigned_to": assignee,
+                    "due_date": due_date,
+                    "evidence": {
+                        "message_id": m.message_id,
+                        "quote": txt[:220],
+                        "author_username": (m.username or "").strip(),
+                        "author_name": (m.full_name or "").strip(),
+                    },
+                }
+            )
+
+        return {
+            "ok": True,
+            "chat_id": int(chat_id),
+            "since_days": int(since_days),
+            "messages_scanned": len(msgs),
+            "tasks": tasks[:200],
+        }
+    except Exception as exc:
+        logger.error("extract_tasks_from_chat failed: chat_id=%s error=%s", chat_id, exc, exc_info=True)
+        return {"ok": False, "error": str(exc), "tasks": []}
 
 async def get_today_events() -> dict[str, Any]:
     """
@@ -1541,10 +1847,12 @@ async def sync_knowledge_folder() -> dict[str, Any]:
 
 async def list_knowledge_sources() -> dict[str, Any]:
     """
-    Список проиндексированных источников (лист knowledge_sources): название, статус, ошибки.
+    Список проиндексированных источников (БД или Sheets): название, статус, ошибки.
     """
     try:
-        rows = await sheets.read_sheet("knowledge_sources")
+        from src.storage.access import list_knowledge_sources
+
+        rows = await list_knowledge_sources()
         items = [
             {
                 "source_id": str(r.get("source_id", "")).strip(),
@@ -1646,9 +1954,9 @@ async def register_employee(
     telegram_user_id: int = 0,
 ) -> dict[str, Any]:
     """
-    Добавить или обновить сотрудника в листе employees (Google Sheets).
+    Добавить или обновить сотрудника в справочнике.
 
-    name — имя в таблице (Ирина, Роксана).
+    name — имя (Ирина, Роксана).
     username — @ник (с @ или без); желательно для привязки после /start в личке с ботом.
     role — должность (менеджер, бариста, шеф, уборщик…).
     telegram_user_id — числовой ID Telegram; передай 0 или не указывай, если ID ещё неизвестен.
@@ -1670,14 +1978,14 @@ async def register_employee(
             names = [str(r.get("name", "")) for _, r in un_matches]
             return {
                 "ok": False,
-                "error": f"Несколько строк с @{un}: {', '.join(names)}. Уточните в таблице.",
+                "error": f"Несколько строк с @{un}: {', '.join(names)}. Уточните в справочнике.",
             }
 
         idx, row = await _find_employee_row_for_register(
             name_clean, un, tid
         )
 
-        if row is not None and idx is not None:
+        if row is not None:
             merged = _employee_row_payload(
                 name_clean,
                 un or str(row.get("username", "")).strip(),
@@ -1685,7 +1993,19 @@ async def register_employee(
                 tid,
                 existing=row,
             )
-            await sheets.update_row("employees", idx, merged)
+            if _use_db_store():
+                await get_store().employees.upsert_employee(
+                    name=str(merged["name"]).strip(),
+                    telegram_user_id=str(merged.get("telegram_user_id", "")).strip(),
+                    username=str(merged.get("username", "")).strip(),
+                    role=str(merged.get("role", "")).strip(),
+                    google_tasks_id=str(merged.get("google_tasks_id", "")).strip(),
+                    active=str(merged.get("active", "true")).strip(),
+                )
+            else:
+                if idx is None:
+                    return {"ok": False, "error": "Не найдена строка employees для обновления"}
+                await sheets.update_row("employees", idx, merged)
             out_tid = str(merged.get("telegram_user_id", "")).strip()
             return {
                 "ok": True,
@@ -1697,10 +2017,18 @@ async def register_employee(
                 "updated": True,
             }
 
-        await sheets.append_row(
-            "employees",
-            _employee_row_payload(name_clean, un, role_clean, tid),
-        )
+        payload = _employee_row_payload(name_clean, un, role_clean, tid)
+        if _use_db_store():
+            await get_store().employees.upsert_employee(
+                name=name_clean,
+                telegram_user_id=str(payload.get("telegram_user_id", "")).strip(),
+                username=str(payload.get("username", "")).strip(),
+                role=str(payload.get("role", "")).strip(),
+                google_tasks_id=str(payload.get("google_tasks_id", "")).strip(),
+                active="true",
+            )
+        else:
+            await sheets.append_row("employees", payload)
         return {
             "ok": True,
             "name": name_clean,
@@ -1874,7 +2202,9 @@ async def send_brief_to_primary_work_chat(message_text: str) -> dict[str, Any]:
         if len(text) > 450:
             text = text[:447] + "..."
 
-        rows_m = await sheets.read_sheet("memory_facts")
+        from src.google.sheets import get_facts
+
+        rows_m = await get_facts()
         last_ts: float | None = None
         for row in rows_m:
             if str(row.get("employee", "")).strip() != _GROUP_NOTICE_COOLDOWN_EMPLOYEE:
@@ -1896,7 +2226,9 @@ async def send_brief_to_primary_work_chat(message_text: str) -> dict[str, Any]:
                 "retry_after_seconds": max(wait, 1),
             }
 
-        chats = await sheets.read_sheet("chats")
+        from src.storage.access import list_chats
+
+        chats = await list_chats()
         chat_id: int | None = None
         for row in chats:
             if str(row.get("active", "")).strip().lower() not in {
@@ -1957,12 +2289,12 @@ async def delegate_private_reminder(
     checklist_items: list[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Поручение сотруднику в личку + запись в лист tasks (фаза «умного посредника»).
+    Поручение сотруднику в личку + задача в Google Tasks (фаза «умного посредника»).
 
     Создаёт задачу и отправляет сотруднику текст в Telegram. В конце сообщения добавляется
     ID задачи — по нему в будущем можно привязывать ответы (реплай).
-    employee_name — имя, @username или должность (су-шеф, шеф…) — см. employees.role.
-    title — короткое название задачи для таблицы.
+    employee_name — имя, @username или должность (су-шеф, шеф…) — см. справочник сотрудников.
+    title — короткое название задачи.
     message_to_employee — полный текст, который увидит человек в личке.
     due_date — YYYY-MM-DD (срок / день контроля).
     notes_for_task — доп. текст в задачу (скрытые детали); если пусто — в notes попадёт смысл поручения.
@@ -2018,15 +2350,17 @@ async def delegate_private_reminder(
                     st_exc,
                 )
 
+        verification_url = str(task_result.get("verification_url", "")).strip()
         out: dict[str, Any] = {
             "ok": bool(dm_result.get("ok")),
             "task": task_result,
             "dm": dm_result,
+            "verification_url": verification_url,
         }
         if not dm_result.get("ok"):
             out["warning"] = (
                 "Задача создана, но личное сообщение не доставлено. "
-                "Проверьте /start у сотрудника и telegram_user_id в employees."
+                "Проверьте /start у сотрудника и telegram_user_id в справочнике."
             )
         return out
     except Exception as exc:
@@ -2041,7 +2375,7 @@ async def delegate_private_reminder(
 
 async def save_fact(fact: str, employee: str | None = None) -> dict[str, Any]:
     """
-    Сохранить важный факт в долгосрочную память (лист memory_facts).
+    Сохранить важный факт в долгосрочную память (Supabase memory_facts).
 
     Вызывай, когда пользователь говорит «запомни», «не забудь», «важно знать»
     или описывает постоянное правило.
@@ -2049,14 +2383,18 @@ async def save_fact(fact: str, employee: str | None = None) -> dict[str, Any]:
     employee: имя сотрудника, если факт про конкретного человека.
     """
     try:
-        await sheets.append_row(
-            "memory_facts",
-            {
-                "employee": employee or "",
-                "fact": fact,
-                "created_at": _now_local_str(),
-            },
-        )
+        key = (employee or "_general").strip() or "_general"
+        if _use_db_store():
+            await get_store().memory.upsert_fact(employee=key, fact=fact)
+        else:
+            await sheets.append_row(
+                "memory_facts",
+                {
+                    "employee": employee or "",
+                    "fact": fact,
+                    "created_at": _now_local_str(),
+                },
+            )
         return {"fact": fact, "employee": employee or ""}
     except Exception as exc:
         logger.error(

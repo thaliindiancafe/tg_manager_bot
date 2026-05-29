@@ -59,7 +59,9 @@ async def run_google_tasks_due_reminders(bot: Bot, now: datetime) -> int:
     sent = 0
 
     try:
-        employees = await sheets.read_sheet("employees")
+        from src.storage.access import list_employees
+
+        employees = await list_employees()
     except Exception as exc:
         logger.error("google_tasks_reminders: read employees failed: %s", exc, exc_info=True)
         return 0

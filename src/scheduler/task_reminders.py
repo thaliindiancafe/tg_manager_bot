@@ -13,6 +13,8 @@ from src.agent import tools as agent_tools
 from src.agent.task_status import TASK_STATUS_REVIEW, is_closed_status, normalize_status
 from src.config import settings
 from src.google import sheets
+from src.storage import get_store
+from src.storage.backend import is_db_backend
 from src.utils.employee_name_match import match_employee_name
 from src.utils.employee_role_resolve import resolve_employee_reference
 
@@ -63,7 +65,9 @@ def _parse_due_date(raw: Any) -> date | None:
 
 
 async def _first_active_chat_id() -> int | None:
-    chats = await sheets.read_sheet("chats")
+    from src.storage.access import list_chats
+
+    chats = await list_chats()
     for row in chats:
         if not _is_active_chat(row.get("active")):
             continue
@@ -112,8 +116,14 @@ async def run_task_due_reminders(bot: Bot, now: datetime) -> int:
 
     sent = 0
     try:
-        rows = await sheets.read_sheet("tasks")
-        employees = await sheets.read_sheet("employees")
+        from src.storage.access import list_employees
+
+        if is_db_backend():
+            rows = await get_store().tasks.list_tasks()
+            employees = await list_employees()
+        else:
+            rows = await sheets.read_sheet("tasks")
+            employees = await list_employees()
     except Exception as exc:
         logger.error("run_task_due_reminders: read tasks failed: %s", exc, exc_info=True)
         return 0
@@ -125,7 +135,7 @@ async def run_task_due_reminders(bot: Bot, now: datetime) -> int:
     ]
 
     for offset, row in enumerate(rows):
-        row_index = offset + 2
+        row_index = None if is_db_backend() else offset + 2
         status = str(row.get("status", "")).strip()
         if is_closed_status(status):
             continue
@@ -167,7 +177,12 @@ async def run_task_due_reminders(bot: Bot, now: datetime) -> int:
                         _UNRESOLVED_ASSIGNEE_MARKER,
                         f"assigned_to={row.get('assigned_to', '')!s}",
                     )
-                    await sheets.update_row("tasks", row_index, marked)
+                    if is_db_backend():
+                        await get_store().tasks.update_task_fields(
+                            task_id, {"notes": marked["notes"]}
+                        )
+                    else:
+                        await sheets.update_row("tasks", row_index, marked)
                 except Exception as mark_exc:
                     logger.error(
                         "task_reminders: mark unresolved failed task_id=%s %s",
@@ -230,7 +245,16 @@ async def run_task_due_reminders(bot: Bot, now: datetime) -> int:
         updated["notes"] = new_notes
 
         try:
-            await sheets.update_row("tasks", row_index, updated)
+            if is_db_backend():
+                await get_store().tasks.update_task_fields(
+                    task_id,
+                    {
+                        "reminder_count": str(new_count),
+                        "notes": new_notes,
+                    },
+                )
+            else:
+                await sheets.update_row("tasks", row_index, updated)
             sent += 1
             logger.info(
                 "task_reminders: sent task_id=%s employee=%s count=%s escalated=%s",

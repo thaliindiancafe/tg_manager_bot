@@ -18,6 +18,7 @@ from src.bot.handlers.delegation_routing import try_handle_photo_proof
 from src.bot.group_gate import should_process_group_message
 from src.bot.private_agent_message import with_private_telegram_context
 from src.google import sheets
+from src.bot.chat_logging import log_incoming_message
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,9 @@ async def handle_photo_message(message: Message, bot: Bot) -> None:
     try:
         if not message.photo:
             return
+
+        # Persist caption (if any) for Mira-like transcript mining.
+        await log_incoming_message(message)
 
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)

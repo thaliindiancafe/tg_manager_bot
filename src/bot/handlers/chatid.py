@@ -16,7 +16,7 @@ router = Router(name="chatid")
 
 @router.message(Command("chatid"))
 async def cmd_chatid(message: Message) -> None:
-    """Return chat_id and title for copying into Google Sheets (chats)."""
+    """Return chat_id and title for bot chat registry."""
     try:
         chat = message.chat
         chat_id = int(chat.id)
@@ -28,8 +28,8 @@ async def cmd_chatid(message: Message) -> None:
             f"Название: {title}",
             f"Тип: {chat_type}",
             "",
-            "Скопируйте chat_id в лист **chats** таблицы бота:",
-            "колонки chat_id, chat_name, active=true.",
+            "Передайте chat_id администратору бота для подключения этого чата.",
+            "Нужны: chat_id, название чата, active=true.",
         ]
         if chat.type == ChatType.PRIVATE:
             lines.insert(

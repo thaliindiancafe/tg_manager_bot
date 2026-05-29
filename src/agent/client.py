@@ -21,6 +21,7 @@ from src.agent.prompt import SYSTEM_PROMPT
 from src.agent import tools as agent_tools
 from src.config import settings, use_openai_llm
 from src.google import sheets
+from src.storage import get_store
 from src.utils.telegram_reply import format_bot_reply
 
 logger = logging.getLogger(__name__)
@@ -694,6 +695,26 @@ def _to_jsonable(value: Any) -> Any:
         return str(value)
 
 
+_CREATION_TOOLS = frozenset({"create_task", "create_event", "delegate_private_reminder"})
+_NO_SHEETS_REPLY_RULE = (
+    "В ответе пользователю обязательно дай ссылку verification_url отдельной строкой "
+    "(без Markdown-разметки). "
+    "Запрещено писать про таблицу, лист, вкладку, Google Sheets, Supabase, "
+    "events, tasks, employees, schedule, SPREADSHEET."
+)
+
+
+def _verification_url_from_tool_result(name: str, result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    if name == "delegate_private_reminder":
+        task = result.get("task")
+        if isinstance(task, dict):
+            return str(task.get("verification_url", "")).strip()
+        return str(result.get("verification_url", "")).strip()
+    return str(result.get("verification_url", "")).strip()
+
+
 async def _execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     tool_fn = TOOL_REGISTRY.get(name)
     if tool_fn is None:
@@ -702,7 +723,16 @@ async def _execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     try:
         logger.info("Gemini tool call: %s args=%s", name, args)
         result = await tool_fn(**args)
-        return {"result": _to_jsonable(result)}
+        payload: dict[str, Any] = {"result": _to_jsonable(result)}
+        if name in _CREATION_TOOLS:
+            url = _verification_url_from_tool_result(name, result)
+            if url:
+                payload["assistant_instruction"] = (
+                    f"{_NO_SHEETS_REPLY_RULE} Ссылка для пользователя: {url}"
+                )
+            else:
+                payload["assistant_instruction"] = _NO_SHEETS_REPLY_RULE
+        return payload
     except Exception as exc:
         logger.error("Tool %s failed: %s", name, exc, exc_info=True)
         return {"error": str(exc)}
@@ -779,25 +809,20 @@ async def _generate_with_tools(
 
 async def _save_history(chat_id: int, user_message: str, model_message: str) -> None:
     timestamp = _now_local_str()
-    chat_key = str(chat_id)
+    if (getattr(settings, "storage_backend", "sheets") or "sheets").strip().lower() == "db":
+        store = get_store()
+        await store.memory.append_history(chat_id, "user", user_message, timestamp)
+        await store.memory.append_history(chat_id, "model", model_message, timestamp)
+        return
 
+    chat_key = str(chat_id)
     await sheets.append_row(
         "memory_history",
-        {
-            "chat_id": chat_key,
-            "role": "user",
-            "content": user_message,
-            "timestamp": timestamp,
-        },
+        {"chat_id": chat_key, "role": "user", "content": user_message, "timestamp": timestamp},
     )
     await sheets.append_row(
         "memory_history",
-        {
-            "chat_id": chat_key,
-            "role": "model",
-            "content": model_message,
-            "timestamp": timestamp,
-        },
+        {"chat_id": chat_key, "role": "model", "content": model_message, "timestamp": timestamp},
     )
 
 

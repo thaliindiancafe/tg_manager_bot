@@ -12,7 +12,9 @@ from src.agent.tools import (
     _employee_row_by_telegram_id,
     _employee_rows_by_username,
 )
+from src.config import settings
 from src.google import sheets
+from src.storage import get_store
 
 logger = logging.getLogger(__name__)
 
@@ -65,34 +67,51 @@ async def cmd_start(message: Message) -> None:
                 merged = dict(row)
                 merged["telegram_user_id"] = tid_str
                 merged["username"] = username
-                await sheets.update_row("employees", idx, merged)
+                if (settings.storage_backend or "sheets").strip().lower() == "db":
+                    await get_store().employees.upsert_employee(
+                        name=str(merged.get("name", "")).strip(),
+                        telegram_user_id=tid_str,
+                        username=username,
+                        role=str(merged.get("role", "")).strip(),
+                        google_tasks_id=str(merged.get("google_tasks_id", "")).strip(),
+                    )
+                else:
+                    await sheets.update_row("employees", idx, merged)
                 human_name = str(row.get("name", "")).strip() or display_name
                 await message.answer(WELCOME_LINKED.format(name=human_name))
                 return
             if len(without_id) > 1:
                 await message.answer(
                     "Нашла несколько строк в списке сотрудников с твоим @username. "
-                    "Попроси руководителя поправить таблицу или обратись к администратору бота."
+                    "Попроси руководителя поправить справочник сотрудников или обратись к администратору бота."
                 )
                 return
             if matches:
                 await message.answer(
                     "Твой @username уже указан у другого сотрудника с привязанным Telegram. "
-                    "Обратись к руководителю, чтобы проверили лист employees."
+                    "Обратись к руководителю, чтобы проверили справочник сотрудников."
                 )
                 return
 
-        await sheets.append_row(
-            "employees",
-            {
-                "name": display_name,
-                "telegram_user_id": tid_str,
-                "username": username,
-                "role": "",
-                "google_tasks_id": "",
-                "active": "true",
-            },
-        )
+        if (settings.storage_backend or "sheets").strip().lower() == "db":
+            await get_store().employees.upsert_employee(
+                name=display_name,
+                telegram_user_id=tid_str,
+                username=username,
+                role="",
+            )
+        else:
+            await sheets.append_row(
+                "employees",
+                {
+                    "name": display_name,
+                    "telegram_user_id": tid_str,
+                    "username": username,
+                    "role": "",
+                    "google_tasks_id": "",
+                    "active": "true",
+                },
+            )
         await message.answer(WELCOME_NEW)
     except Exception as exc:
         logger.error(

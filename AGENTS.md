@@ -5,6 +5,10 @@ Telegram AI-агент для управления командой рестор
 Аналог Mira, но с общей памятью между чатами.
 Разрабатывается как тиражируемый продукт (мультитенантность с client_id).
 
+## Репозиторий (GitHub)
+- **URL:** https://github.com/thaliindiancafe/tg_manager_bot
+- **Ветка:** `main`
+
 ## Стек
 - Python 3.11
 - aiogram 3.20.0 — Telegram бот (async, webhook)

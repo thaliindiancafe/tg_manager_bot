@@ -47,7 +47,7 @@ mkdir -p /opt/tg-manager-agent
 cd /opt
 
 # Замените URL на ваш репозиторий
-git clone https://github.com/YOUR_USER/tg-manager-agent.git tg-manager-agent
+git clone https://github.com/thaliindiancafe/tg_manager_bot.git tg-manager-agent
 cd /opt/tg-manager-agent
 ```
 

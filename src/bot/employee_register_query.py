@@ -21,15 +21,24 @@ _EMPLOYEE_CONTEXT = re.compile(
     r"сотрудник|employees|базу\s+данн|справочник|команд",
     re.IGNORECASE,
 )
+# «добавь задачи», «проставь в гугл таск», «исследуй диалог» — не регистрация сотрудников
+_NOT_EMPLOYEE_REGISTER = re.compile(
+    r"задач|поручен|гугл\s*таск|google\s*task|календар|мероприят|"
+    r"диалог|истори|исследуй|проставь|последн",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_bulk_register(text: str) -> bool:
     if not _REGISTER_INTENT.search(text):
         return False
+    if _NOT_EMPLOYEE_REGISTER.search(text):
+        return False
     parsed = parse_employees_bulk_text(text)
     if len(parsed) >= 2:
         return True
-    if len(parsed) == 1 and (_EMPLOYEE_CONTEXT.search(text) or "@" in text):
+    # Одна строка — только явный контекст employees (не любой @ в тексте)
+    if len(parsed) == 1 and _EMPLOYEE_CONTEXT.search(text):
         return True
     return False
 
@@ -40,7 +49,7 @@ def _format_bulk_reply(data: dict) -> str:
         return format_bot_reply(err or "Не удалось добавить сотрудников. Проверьте формат строк.")
 
     lines = [
-        f"✅ В таблицу employees записано: {data['ok_count']} из "
+        f"✅ В справочник сотрудников добавлено: {data['ok_count']} из "
         f"{data.get('total_parsed', data['ok_count'])}.",
     ]
     failed = data.get("failed") or []
@@ -66,7 +75,7 @@ def _format_bulk_reply(data: dict) -> str:
 def _register_error_message(exc: BaseException) -> str:
     if isinstance(exc, (ssl.SSLError, TimeoutError, ConnectionError, OSError)):
         return format_bot_reply(
-            "Не удалось записать в Google Sheets из-за сбоя сети. "
+            "Не удалось сохранить сотрудников из-за сбоя сети. "
             "Подождите минуту и отправьте список ещё раз."
         )
     return format_bot_reply(

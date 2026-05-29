@@ -36,7 +36,11 @@ def test_resolve_from_schedule_mock():
     employees = [{"name": "Ира", "active": "true"}]
     with (
         patch(
-            "src.utils.schedule_shift_resolve.sheets.read_sheet",
+            "src.storage.backend.is_db_backend",
+            return_value=False,
+        ),
+        patch(
+            "src.google.sheets.read_sheet",
             fake_read,
         ),
         patch(

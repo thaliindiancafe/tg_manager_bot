@@ -11,7 +11,7 @@ from src.agent.knowledge.embeddings import (
     load_embeddings,
 )
 from src.config import settings
-from src.google import sheets
+from src.storage.access import list_knowledge_chunks, list_knowledge_sources
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ async def search_knowledge(query: str, top_k: int | None = None) -> dict[str, An
         return {"ok": False, "error": "Пустой запрос", "matches": []}
 
     limit = top_k if top_k is not None else settings.knowledge_search_top_k
-    sources = await sheets.read_sheet("knowledge_sources")
+    sources = await list_knowledge_sources()
     active_ids = {
         str(s.get("source_id", "")).strip()
         for s in sources
@@ -36,7 +36,7 @@ async def search_knowledge(query: str, top_k: int | None = None) -> dict[str, An
         for s in sources
     }
 
-    chunks = await sheets.read_sheet("knowledge_chunks")
+    chunks = await list_knowledge_chunks()
     candidates: list[tuple[float, dict[str, Any]]] = []
 
     try:

@@ -10,7 +10,6 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.google import sheets
 from src.utils.employee_name_match import match_employee_name
 from src.utils.employee_role_resolve import EmployeeResolveResult
 
@@ -111,12 +110,21 @@ async def resolve_shift_unpacking_from_schedule(
         )
 
     try:
-        schedule = await sheets.read_sheet("schedule")
+        from src.storage.backend import is_db_backend
+
+        if is_db_backend():
+            from src.storage import get_store
+
+            schedule = await get_store().schedule.list_schedule()
+        else:
+            from src.google import sheets
+
+            schedule = await sheets.read_sheet("schedule")
     except Exception as exc:
         logger.error("resolve_shift_unpacking: schedule read failed: %s", exc)
         return EmployeeResolveResult(
             ok=False,
-            error="Не удалось прочитать лист schedule.",
+            error="Не удалось прочитать график смен (schedule).",
         )
 
     on_shift: list[tuple[str, str]] = []  # (employee from schedule, schedule role)

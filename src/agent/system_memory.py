@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import logging
 
+from src.config import settings
 from src.google import sheets
+from src.storage import get_store
 
 logger = logging.getLogger(__name__)
 
 # employee column -> fact text (upserted by scripts/seed_system_memory.py)
 SYSTEM_MEMORY_FACTS: dict[str, str] = {
     "_system_product": (
+        "Репозиторий кода: https://github.com/thaliindiancafe/tg_manager_bot (main). "
+        "Деплой: Beget VPS, systemd + uvicorn webhook. "
         "Реализовано (май 2026): поручения в ЛС (чеклист, фото, approve/reject); напоминания по "
         "сроку и эскалация в чат; график 07:00 МСК; база знаний Drive 08:00; два календаря; "
         "Google Tasks OAuth + авто-список при create_task/delegate; импорт GT→Sheets каждые 5 мин; "
@@ -18,28 +22,26 @@ SYSTEM_MEMORY_FACTS: dict[str, str] = {
         "автоматизации; save_fact; память между чатами."
     ),
     "_system_calendar": (
-        "Google Calendar: create_event → CALENDAR_EVENTS_ID + лист events. "
-        "Утренний синк events (07:05 МСК по умолчанию) — текущий месяц из основного + "
-        "«Мероприятия» в лист events. Чтение: get_events_for_dates (sheet + live API). "
-        "CALENDAR_ID, CALENDAR_EVENTS_ID в .env; service account с правом изменения."
+        "Google Calendar: create_event → CALENDAR_EVENTS_ID. "
+        "Чтение: get_events_for_dates — только live API (CALENDAR_ONLY_MODE / STORAGE_BACKEND=db). "
+        "Лист events в Sheets не используется. CALENDAR_ID, CALENDAR_EVENTS_ID в .env; "
+        "service account или OAuth с calendar.readonly."
     ),
     "_system_tasks": (
-        "Google Tasks (OAuth Gmail клиента): create_task/delegate пишут в список сотрудника. "
-        "Если google_tasks_id пуст — бот ищет список по имени или создаёт новый и прописывает в employees. "
-        "Импорт открытых задач в лист tasks каждые 5 мин (GOOGLE_TASKS_SHEETS_SYNC). "
-        "Привязка списков Tasks к employees — ежедневно 07:10 МСК (GOOGLE_TASKS_LISTS_SYNC); "
-        "новые списки без сотрудника добавляются в employees. "
-        "Поручение: @username в тексте (например @asimhayatkhan). "
-        "OAuth один раз: google_tasks_oauth_setup.py."
+        "Google Tasks (OAuth Gmail клиента): create_task/delegate → список сотрудника + метаданные в БД. "
+        "Если google_tasks_id пуст — бот ищет список по имени или создаёт новый (employees в Supabase). "
+        "GOOGLE_TASKS_SHEETS_SYNC — только при STORAGE_BACKEND=sheets (по умолчанию выкл в db). "
+        "Привязка списков Tasks ↔ employees — 07:10 МСК (GOOGLE_TASKS_LISTS_SYNC). "
+        "Поручение: @username в тексте. OAuth: google_tasks_oauth_setup.py."
     ),
     "_system_knowledge": (
-        "База знаний: файлы в папке DRIVE_KNOWLEDGE_FOLDER_ID на Drive. Индексация каждый день "
-        "в 08:00 МСК и по запросу sync_knowledge_folder. На вопросы про меню, регламенты, "
-        "инструкции — сначала search_knowledge, не выдумывать. Google Doc и PDF поддерживаются."
+        "База знаний: файлы в DRIVE_KNOWLEDGE_FOLDER_ID. Индексация 08:00 МСК → "
+        "knowledge_sources/knowledge_chunks в Supabase (STORAGE_BACKEND=db). "
+        "На вопросы про меню и регламенты — search_knowledge, не выдумывать."
     ),
     "_system_schedule": (
-        "График смен: лист schedule в таблице бота обновляется автоматически каждый день в 07:00 "
-        "МСК из вкладки SOURCE_SCHEDULE_SHEET_NAME (по умолчанию «График Текущий месяц») в SOURCE. "
+        "График смен: таблица schedule в Supabase (при STORAGE_BACKEND=db) обновляется каждый день "
+        "в 07:00 МСК из вкладки SOURCE_SCHEDULE_SHEET_NAME в SOURCE_SPREADSHEET_ID (только чтение). "
         "Для ответов используй get_schedule_for_dates (today/tomorrow/yesterday или даты YYYY-MM-DD)."
     ),
     "_system_deferred_events_sheet": (
@@ -56,7 +58,10 @@ async def seed_system_memory_facts() -> dict[str, str]:
     results: dict[str, str] = {}
     for employee_key, fact_text in SYSTEM_MEMORY_FACTS.items():
         try:
-            await sheets.upsert_memory_fact_row(employee_key, fact_text)
+            if (getattr(settings, "storage_backend", "sheets") or "sheets").strip().lower() == "db":
+                await get_store().memory.upsert_fact(employee=employee_key, fact=fact_text)
+            else:
+                await sheets.upsert_memory_fact_row(employee_key, fact_text)
             results[employee_key] = "ok"
             logger.info("seed_system_memory: upserted %s", employee_key)
         except Exception as exc:
